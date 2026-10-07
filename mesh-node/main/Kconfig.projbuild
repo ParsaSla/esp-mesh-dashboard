@@ -1,0 +1,41 @@
+menu "Mesh node settings"
+
+config MESH_NODE_ROUTER_SSID
+    string "Router SSID"
+    default "parsaHome"
+    help
+        SSID of the 2.4 GHz router configured on the fixed mesh root.
+
+config MESH_NODE_ROUTER_PASSWORD
+    string "Router password"
+    default "parsa@138405"
+    help
+        Router password configured on the fixed mesh root.
+
+config MESH_NODE_AP_PASSWORD
+    string "Mesh network password"
+    default "mesh-password"
+    help
+        WPA2 mesh AP password. It must match the fixed root.
+
+config MESH_NODE_MESH_ID
+    string "Mesh ID (12 hexadecimal characters)"
+    default "777777777777"
+    help
+        Six-byte mesh identifier. It must match the fixed root.
+
+config MESH_NODE_MAX_LAYER
+    int "Maximum mesh layer"
+    range 1 25
+    default 6
+    help
+        Maximum number of levels in the mesh topology.
+
+config MESH_NODE_HEARTBEAT_INTERVAL_MS
+    int "Heartbeat interval (milliseconds)"
+    range 1000 3600000
+    default 10000
+    help
+        Interval between application heartbeats sent to the mesh root.
+
+endmenu

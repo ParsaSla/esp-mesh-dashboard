@@ -1,0 +1,35 @@
+menu "Mesh root settings"
+
+config MESH_ROOT_ROUTER_SSID
+    string "Router SSID"
+    default "parsaHome"
+    help
+        SSID of the 2.4 GHz Wi-Fi router used by the mesh root for its uplink.
+
+config MESH_ROOT_ROUTER_PASSWORD
+    string "Router password"
+    default "parsa@138405"
+    help
+        Leave empty only when connecting to an open router network.
+
+config MESH_ROOT_AP_PASSWORD
+    string "Mesh network password"
+    default "mesh-password"
+    help
+        WPA2 password used by mesh nodes when joining this network.
+        Configure the same password in every node's firmware.
+
+config MESH_ROOT_MESH_ID
+    string "Mesh ID (12 hexadecimal characters)"
+    default "777777777777"
+    help
+        Six-byte mesh identifier. Configure the same ID in every node's firmware.
+
+config MESH_ROOT_MAX_LAYER
+    int "Maximum mesh layer"
+    range 1 25
+    default 6
+    help
+        Maximum number of levels in the mesh topology.
+
+endmenu
