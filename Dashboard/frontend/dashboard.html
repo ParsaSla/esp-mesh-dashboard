@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ESP32 Mesh Dashboard</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">ESP32 Mesh Dashboard</p>
+          <h1>Node telemetry</h1>
+        </div>
+        <div id="gateway-status" class="status-pill disconnected">Gateway disconnected</div>
+      </header>
+
+      <section class="metrics-grid">
+        <article class="card stat-card">
+          <span class="label">Node ID</span>
+          <h2 id="node-id">--</h2>
+        </article>
+        <article class="card stat-card">
+          <span class="label">Temperature</span>
+          <h2 id="temperature">--</h2>
+        </article>
+        <article class="card stat-card">
+          <span class="label">Humidity</span>
+          <h2 id="humidity">--</h2>
+        </article>
+        <article class="card stat-card">
+          <span class="label">Sequence</span>
+          <h2 id="sequence">--</h2>
+        </article>
+      </section>
+
+      <section class="card chart-card">
+        <div class="panel-header">
+          <h3>Recent telemetry</h3>
+          <span id="updated-at">Waiting for data</span>
+        </div>
+        <canvas id="telemetry-chart" width="920" height="260"></canvas>
+      </section>
+
+      <section class="card">
+        <div class="panel-header">
+          <h3>Recent message log</h3>
+        </div>
+        <ul id="message-log" class="message-log"></ul>
+      </section>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
