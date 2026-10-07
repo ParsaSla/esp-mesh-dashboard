@@ -70,3 +70,4 @@ Testing/
 __pycache__/
 *.py[cod]
 .venv/
+Dashboard/.vscode/settings.json
