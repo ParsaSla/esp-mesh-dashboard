@@ -78,10 +78,17 @@ class MeshReceiver:
         message = normalize_message(raw_message)
         node_id = message["nodeId"]
         sequence = message["sequence"]
+        boot_id = message.get("bootId")
 
         current = self.nodes.get(node_id)
-        if current and current.get("sequence") is not None and sequence <= current["sequence"]:
-            raise ValueError(f"Duplicate or out-of-order sequence for {node_id}: {sequence}")
+        if current and current.get("sequence") is not None:
+            cur_boot_id = current.get("bootId")
+            if boot_id is not None:
+                if cur_boot_id == boot_id and sequence <= current["sequence"]:
+                    raise ValueError(f"Duplicate or out-of-order sequence for {node_id} (boot {boot_id}): {sequence}")
+            else:
+                if sequence <= current["sequence"]:
+                    raise ValueError(f"Duplicate or out-of-order sequence for {node_id}: {sequence}")
 
         state = {
             "nodeId": node_id,
@@ -90,18 +97,32 @@ class MeshReceiver:
             "payload": message["payload"],
             "meshId": message.get("meshId"),
             "rssi": message.get("rssi"),
+            "rssiSourceNodeId": message.get("rssiSourceNodeId"),
+            "hops": message.get("hops"),
+            "bootId": boot_id,
+            "units": message.get("units"),
             "batteryLevel": message.get("batteryLevel"),
             "firmwareVersion": message.get("firmwareVersion"),
             "role": message.get("role"),
         }
+        for key in ("sender", "destination", "ttl", "packetPayload"):
+            if message.get(key) is not None:
+                state[key] = message[key]
 
         self.nodes[node_id] = state
 
         sample = {
+            **message["payload"],
             "timestamp": message["timestamp"],
             "sequence": sequence,
-            **message["payload"],
         }
+        for k in ("bootId", "rssi", "rssiSourceNodeId", "hops", "units"):
+            if message.get(k) is not None:
+                sample[k] = message[k]
+        for key in ("sender", "destination", "ttl", "packetPayload"):
+            if message.get(key) is not None:
+                sample[key] = message[key]
+
         self.history.add(node_id, sample)
         self.connected = True
         self.gateway_message = f"Received telemetry from {node_id}"
@@ -113,6 +134,15 @@ class MeshReceiver:
             "sequence": sequence,
             "payload": message["payload"],
         }
+        for k in ("bootId", "rssi", "rssiSourceNodeId", "hops", "units", "batteryLevel", "firmwareVersion", "role"):
+            if message.get(k) is not None:
+                event[k] = message[k]
+        if "packetPayload" in message:
+            event["rssi"] = message.get("rssi")
+        for key in ("sender", "destination", "ttl", "packetPayload"):
+            if message.get(key) is not None:
+                event[key] = message[key]
+
         return event
 
     def get_health(self):
@@ -127,17 +157,32 @@ class MeshReceiver:
         node = self.nodes.get(node_id)
         if node is None:
             return None
-        return {
+        res = {
             "nodeId": node["nodeId"],
             "timestamp": node["timestamp"],
             "sequence": node["sequence"],
             "payload": node["payload"],
-            **({"meshId": node["meshId"]} if node.get("meshId") is not None else {}),
-            **({"rssi": node["rssi"]} if node.get("rssi") is not None else {}),
-            **({"batteryLevel": node["batteryLevel"]} if node.get("batteryLevel") is not None else {}),
-            **({"firmwareVersion": node["firmwareVersion"]} if node.get("firmwareVersion") is not None else {}),
-            **({"role": node["role"]} if node.get("role") is not None else {}),
         }
+        for k in (
+            "meshId",
+            "rssi",
+            "rssiSourceNodeId",
+            "hops",
+            "bootId",
+            "units",
+            "batteryLevel",
+            "firmwareVersion",
+            "role",
+            "sender",
+            "destination",
+            "ttl",
+            "packetPayload",
+        ):
+            if node.get(k) is not None:
+                res[k] = node[k]
+        if "packetPayload" in node:
+            res["rssi"] = node.get("rssi")
+        return res
 
     def list_nodes(self):
         return [self.get_node(node_id) for node_id in sorted(self.nodes)]

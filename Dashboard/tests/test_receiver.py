@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -64,6 +66,56 @@ def test_latest_value_replaces_previous_state():
     assert len(receiver.get_history("node-001")) == 2
 
 
+def test_mesh_callback_json_is_exposed_as_node_and_packet_metadata():
+    receiver = MeshReceiver()
+    packet = {
+        "sender": "AA:BB:CC:DD:EE:02",
+        "rssi": -61,
+        "origin": "AA:BB:CC:DD:EE:01",
+        "destination": "FF:FF:FF:FF:FF:FF",
+        "sequence": 7,
+        "ttl": 5,
+        "hops": 2,
+        "payload": '{"temperature":24.5,"note":"ok"}',
+    }
+
+    event = receiver.handle_message(json.dumps(packet))
+    node = receiver.get_node("AA:BB:CC:DD:EE:01")
+
+    assert event["nodeId"] == "AA:BB:CC:DD:EE:01"
+    assert event["rssi"] == -61.0
+    assert event["sender"] == "AA:BB:CC:DD:EE:02"
+    assert event["destination"] == "FF:FF:FF:FF:FF:FF"
+    assert event["ttl"] == 5
+    assert event["packetPayload"] == packet["payload"]
+    assert node["payload"] == {"temperature": 24.5}
+    assert node["rssiSourceNodeId"] == "AA:BB:CC:DD:EE:02"
+    assert node["sender"] == packet["sender"]
+    assert node["destination"] == packet["destination"]
+    assert node["ttl"] == packet["ttl"]
+    assert receiver.get_history(node["nodeId"])[0]["temperature"] == 24.5
+
+
+def test_mesh_callback_json_accepts_null_rssi_and_text_payload():
+    receiver = MeshReceiver()
+    packet = {
+        "sender": "AA:BB:CC:DD:EE:02",
+        "rssi": None,
+        "origin": "AA:BB:CC:DD:EE:01",
+        "destination": "AA:BB:CC:DD:EE:03",
+        "sequence": 8,
+        "ttl": 4,
+        "hops": 1,
+        "payload": "hello mesh",
+    }
+
+    event = receiver.handle_message(packet)
+
+    assert event.get("rssi") is None
+    assert event["payload"] == {}
+    assert event["packetPayload"] == "hello mesh"
+
+
 def test_api_endpoints_expose_latest_node_state():
     client = TestClient(app)
     receiver.nodes.clear()
@@ -72,7 +124,7 @@ def test_api_endpoints_expose_latest_node_state():
 
     dashboard = client.get("/")
     assert dashboard.status_code == 200
-    assert "ESP32 Mesh Dashboard" in dashboard.text
+    assert 'id="telemetry-chart"' in dashboard.text
     assert client.get("/static/app.js").status_code == 200
     assert client.get("/static/styles.css").status_code == 200
 

@@ -1,0 +1,255 @@
+import logging
+import math
+import os
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+import httpx
+
+from insights import calculate_insights
+
+logger = logging.getLogger("esp_mesh_dashboard.ai")
+
+
+def calculate_dew_point(temperature: float, humidity: float) -> Optional[float]:
+    """Calculates dew point temperature in Celsius using the Magnus-Tetens formula."""
+    if not (math.isfinite(temperature) and math.isfinite(humidity)):
+        return None
+    if humidity <= 0 or humidity > 100:
+        return None
+    a = 17.27
+    b = 237.7
+    try:
+        alpha = ((a * temperature) / (b + temperature)) + math.log(humidity / 100.0)
+        dew_point = (b * alpha) / (a - alpha)
+        return round(dew_point, 2)
+    except (ValueError, ZeroDivisionError):
+        return None
+
+
+def get_ai_config() -> Dict[str, Any]:
+    api_key = os.getenv("AI_API_KEY", "").strip()
+    base_url = os.getenv("AI_BASE_URL", "https://api.deepseek.com").strip().rstrip("/")
+    model = os.getenv("AI_MODEL", "deepseek-chat").strip()
+    return {
+        "api_key": api_key,
+        "base_url": base_url,
+        "model": model,
+        "configured": bool(api_key),
+    }
+
+
+def build_grounding_context(receiver: Any, selected_node_id: Optional[str] = None) -> Dict[str, Any]:
+    health = receiver.get_health()
+    all_nodes = receiver.list_nodes()
+
+    summary_lines = []
+    summary_lines.append(f"Gateway Status: {'CONNECTED' if health.get('gatewayConnected') else 'OFFLINE'}")
+    summary_lines.append(f"Gateway Info: {health.get('gatewayMessage', 'N/A')}")
+    summary_lines.append(f"Reporting Stations: {len(all_nodes)}")
+
+    nodes_context = []
+    now = datetime.now(timezone.utc)
+
+    for node in all_nodes:
+        nid = node.get("nodeId", "unknown")
+        seq = node.get("sequence")
+        rssi = node.get("rssi")
+        rssi_src = node.get("rssiSourceNodeId")
+        hops = node.get("hops")
+        bat = node.get("batteryLevel")
+        payload = node.get("payload", {})
+        units = node.get("units", {})
+        ts_str = node.get("timestamp")
+
+        age_sec = None
+        if ts_str:
+            try:
+                ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                age_sec = round((now - ts).total_seconds(), 1)
+            except Exception:
+                pass
+
+        node_info = {
+            "nodeId": nid,
+            "sequence": seq,
+            "lastSeenAgeSec": age_sec,
+            "rssi": f"{rssi} dBm" if rssi is not None else "unavailable",
+            "rssiSource": rssi_src,
+            "hops": hops,
+            "battery": f"{bat}%" if bat is not None else "unavailable",
+            "readings": {k: f"{v} {units.get(k, '')}".strip() for k, v in payload.items()},
+        }
+        nodes_context.append(node_info)
+
+        readings_str = ", ".join(f"{k}: {v}" for k, v in node_info["readings"].items()) or "no readings"
+        summary_lines.append(
+            f"- Station {nid}: seq={seq}, age={age_sec}s, RSSI={node_info['rssi']} "
+            f"(via {rssi_src or nid}, {hops or 1} hop(s)), battery={node_info['battery']}, readings=[{readings_str}]"
+        )
+
+    selected_context = None
+    if selected_node_id:
+        selected_node = receiver.get_node(selected_node_id)
+        if selected_node:
+            history = receiver.get_history(selected_node_id, limit=60)
+            insights_res = calculate_insights(selected_node_id, history, node=selected_node)
+            payload = selected_node.get("payload", {})
+
+            # Weather / dew point check if temp and humidity exist (including dotted keys like temp.ambient)
+            temp = None
+            hum = None
+            for k, v in payload.items():
+                k_lower = k.lower()
+                if ("temp" in k_lower or "temperature" in k_lower) and temp is None:
+                    temp = v
+                elif ("hum" in k_lower or "humidity" in k_lower) and hum is None:
+                    hum = v
+            weather_analysis = None
+            if temp is not None and hum is not None and isinstance(temp, (int, float)) and isinstance(hum, (int, float)):
+                dew_point = calculate_dew_point(float(temp), float(hum))
+                if dew_point is not None:
+                    depression = round(float(temp) - dew_point, 2)
+                    if float(hum) >= 85 and depression <= 2.5:
+                        rain_assessment = "High moisture / near saturation; fog or precipitation likely if rising or cooled."
+                    elif float(temp) >= 35 and float(hum) <= 35:
+                        rain_assessment = "Hot, arid/dry condition; precipitation highly improbable without severe cooling or weather front."
+                    elif float(hum) >= 60:
+                        rain_assessment = "Moderate to elevated humidity; rain depends on cloud cover and atmospheric pressure drop."
+                    else:
+                        rain_assessment = "Dry to comfortable atmospheric levels; rain unlikely under stable pressure."
+
+                    weather_analysis = {
+                        "temperatureC": float(temp),
+                        "relativeHumidityPercent": float(hum),
+                        "dewPointC": dew_point,
+                        "dewPointDepressionC": depression,
+                        "assessment": rain_assessment,
+                    }
+
+            selected_context = {
+                "nodeId": selected_node_id,
+                "latestPayload": payload,
+                "sampleCount": len(history),
+                "weatherAnalysis": weather_analysis,
+                "statisticalInsights": insights_res.get("insights", []),
+            }
+
+            if weather_analysis:
+                summary_lines.append(
+                    f"\nDetailed Physical Analysis for {selected_node_id}:\n"
+                    f"  Temperature: {weather_analysis['temperatureC']} °C, Humidity: {weather_analysis['relativeHumidityPercent']} %RH\n"
+                    f"  Dew Point: {weather_analysis['dewPointC']} °C (Depression: {weather_analysis['dewPointDepressionC']} °C)\n"
+                    f"  Rain/Condensation Assessment: {weather_analysis['assessment']}"
+                )
+
+            if insights_res.get("insights"):
+                summary_lines.append("\nStatistical Insights:")
+                for ins in insights_res["insights"]:
+                    summary_lines.append(f"  [{ins.get('kind', '').upper()}] {ins.get('message', '')}")
+
+    return {
+        "summary": "\n".join(summary_lines),
+        "gateway": health,
+        "nodes": nodes_context,
+        "selectedNode": selected_context,
+    }
+
+
+def build_system_prompt(grounding: Dict[str, Any]) -> str:
+    return (
+        "You are the ESP32 Mesh Telemetry AI Assistant, an expert IoT monitoring engineer "
+        "and environmental sensor specialist.\n\n"
+        "LIVE MESH NETWORK AND SENSOR CONTEXT:\n"
+        f"{grounding.get('summary', 'No telemetry available.')}\n\n"
+        "GUIDELINES FOR YOUR ANSWERS:\n"
+        "1. Ground all answers strictly in the real-time telemetry and network context provided above.\n"
+        "2. Refer directly to station IDs (e.g. node-001, AA:BB:CC:DD:EE:FF), sequence numbers, RSSI in dBm, and hop count when discussing connectivity or hardware.\n"
+        "3. When asked about weather or rain (e.g., 'Will it rain?', 'What does 40C and 30% humidity mean?'), explain the atmospheric physics truthfully:\n"
+        "   - Use temperature, humidity, and dew point.\n"
+        "   - Note that rain requires cooling near dew point and cloud condensation nuclei; hot, low-humidity air (like 40°C with 30% RH) has a large dew point depression (~19°C dew point), making rain very unlikely under stable conditions.\n"
+        "   - Note that true barometric weather forecasting requires a barometric pressure sensor (e.g. BMP280/BME280).\n"
+        "4. Be technical, helpful, and concise. Avoid fluff or ungrounded speculation.\n"
+        "5. Provide output in clear plain text without markdown formatting (no asterisks, bolding, hashes, or backticks) so it renders cleanly in an instrument terminal."
+    )
+
+
+async def ask_mesh_ai(
+    message: str,
+    history: Optional[List[Dict[str, str]]] = None,
+    selected_node_id: Optional[str] = None,
+    receiver: Any = None,
+    client: Optional[httpx.AsyncClient] = None,
+) -> Dict[str, Any]:
+    config = get_ai_config()
+    grounding = build_grounding_context(receiver, selected_node_id) if receiver else {"summary": "Receiver offline."}
+
+    if not config["configured"]:
+        return {
+            "configured": False,
+            "reply": (
+                "AI Assistant is not configured. Please add `AI_API_KEY` (e.g. DeepSeek or OpenAI key) "
+                "to `Dashboard/.env` to enable real-time conversational analysis."
+            ),
+            "grounding": grounding,
+        }
+
+    system_prompt = build_system_prompt(grounding)
+    messages = [{"role": "system", "content": system_prompt}]
+
+    # Append valid conversation history (last 8 messages max)
+    if history and isinstance(history, list):
+        for turn in history[-8:]:
+            role = turn.get("role")
+            content = turn.get("content")
+            if role in ("user", "assistant") and isinstance(content, str) and content.strip():
+                messages.append({"role": role, "content": content.strip()})
+
+    messages.append({"role": "user", "content": message.strip()})
+
+    url = f"{config['base_url']}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {config['api_key']}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": config["model"],
+        "messages": messages,
+        "max_tokens": 800,
+        "temperature": 0.3,
+    }
+
+    own_client = False
+    if client is None:
+        client = httpx.AsyncClient(timeout=35.0)
+        own_client = True
+
+    try:
+        response = await client.post(url, headers=headers, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        reply_text = data["choices"][0]["message"]["content"]
+        return {
+            "configured": True,
+            "reply": reply_text,
+            "model": config["model"],
+            "grounding": grounding,
+        }
+    except httpx.HTTPStatusError as exc:
+        logger.error("AI upstream HTTP error: %s - %s", exc.response.status_code, exc.response.text)
+        return {
+            "configured": True,
+            "error": True,
+            "reply": f"AI provider error ({exc.response.status_code}): {exc.response.text}",
+            "grounding": grounding,
+        }
+    except Exception as exc:
+        logger.error("AI upstream request failed: %s", exc)
+        return {
+            "configured": True,
+            "error": True,
+            "reply": f"Unable to reach AI provider: {str(exc)}",
+            "grounding": grounding,
+        }
+    finally:
+        if own_client:
+            await client.aclose()

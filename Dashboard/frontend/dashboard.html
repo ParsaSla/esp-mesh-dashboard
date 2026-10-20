@@ -3,54 +3,136 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>ESP32 Mesh Dashboard</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <title>ESP32 Mesh Telemetry — Observer</title>
+    <link rel="stylesheet" href="/static/styles.css?v=3.0" />
   </head>
   <body>
     <div class="app-shell">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">ESP32 Mesh Dashboard</p>
-          <h1>Node telemetry</h1>
-        </div>
-        <div id="gateway-status" class="status-pill disconnected">Gateway disconnected</div>
-      </header>
+      <!-- Left rail: Station roster -->
+      <aside class="rail">
+        <header class="rail-head">
+          <p class="rail-title">ESP32 MESH</p>
+          <p class="rail-sub">OBSERVER CONSOLE</p>
+        </header>
 
-      <section class="metrics-grid">
-        <article class="card stat-card">
-          <span class="label">Node ID</span>
-          <h2 id="node-id">--</h2>
-        </article>
-        <article class="card stat-card">
-          <span class="label">Temperature</span>
-          <h2 id="temperature">--</h2>
-        </article>
-        <article class="card stat-card">
-          <span class="label">Humidity</span>
-          <h2 id="humidity">--</h2>
-        </article>
-        <article class="card stat-card">
-          <span class="label">Sequence</span>
-          <h2 id="sequence">--</h2>
-        </article>
-      </section>
+        <nav id="station-rail" class="rail-nav" aria-label="Stations">
+          <p class="section-label">STATIONS <span id="rail-count" class="mono-dim">0</span></p>
+          <div id="station-list" class="station-list">
+            <p class="rail-empty" id="rail-empty">no stations reporting</p>
+          </div>
+        </nav>
+      </aside>
 
-      <section class="card chart-card">
-        <div class="panel-header">
-          <h3>Recent telemetry</h3>
-          <span id="updated-at">Waiting for data</span>
+      <!-- Center main column -->
+      <main class="main">
+        <div class="topbar">
+          <div class="title-block">
+            <h1 id="health-headline" class="health-headline">WAITING FOR STATIONS…</h1>
+            <div class="healthbar" id="healthbar" aria-hidden="true">
+              <span class="healthbar-seg live" id="hb-live"></span>
+              <span class="healthbar-seg warn" id="hb-warn"></span>
+              <span class="healthbar-seg stale" id="hb-stale"></span>
+            </div>
+          </div>
+          <div class="top-tags">
+            <span id="ws-pill" class="tag">STREAM <b data-value>—</b></span>
+            <span id="gw-pill" class="tag">GATEWAY <b data-value>—</b></span>
+          </div>
         </div>
-        <canvas id="telemetry-chart" width="920" height="260"></canvas>
-      </section>
 
-      <section class="card">
-        <div class="panel-header">
-          <h3>Recent message log</h3>
+        <div id="banner" class="banner" hidden>
+          <span id="banner-text"></span>
         </div>
-        <ul id="message-log" class="message-log"></ul>
-      </section>
+
+        <section id="metric-grid" class="metric-strip" aria-live="polite">
+          <p class="empty-note" id="metrics-empty">no telemetry yet — waiting for the first station report</p>
+        </section>
+
+        <section class="insights-block" id="insights-block" aria-live="polite">
+          <div class="panel-header">
+            <div class="panel-title-wrap">
+              <h3>AUTOMATED INSIGHTS <span id="insights-node" class="mono-dim">station</span></h3>
+              <span class="panel-subtitle">STATISTICAL RULES · NO PREDICTION MODEL</span>
+            </div>
+            <span id="insights-updated-at" class="mono-dim">—</span>
+          </div>
+          <div id="insights-content" class="insights-content">
+            <p class="empty-note" id="insights-empty">no station selected</p>
+          </div>
+        </section>
+
+        <section class="chart-block">
+          <div class="panel-header">
+            <div class="chart-header-left">
+              <h3>TELEMETRY <span id="chart-node" class="mono-dim">station</span> <span id="chart-seq" class="mono-dim"></span></h3>
+              <div id="chart-legend" class="chart-legend"></div>
+            </div>
+            <span id="updated-at" class="mono-dim">—</span>
+          </div>
+          <div class="chart-frame" id="chart-frame">
+            <canvas id="telemetry-chart" aria-label="Telemetry trend chart for the selected station" role="img"></canvas>
+            <div id="chart-empty" class="empty-note chart-empty">no samples for this station yet</div>
+          </div>
+          <div class="sr-only" aria-hidden="true">
+            <table id="chart-table">
+              <caption>Latest telemetry samples</caption>
+              <thead><tr><th scope="col">Time</th><th scope="col">Temperature</th><th scope="col">Humidity</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="log-block">
+          <div class="panel-header">
+            <h3>EVENT LOG</h3>
+            <span class="mono-dim">NEWEST FIRST</span>
+          </div>
+          <ul id="event-log" class="event-log">
+            <li class="log-empty" id="log-empty">no events yet</li>
+          </ul>
+        </section>
+      </main>
+
+      <!-- Right sidebar: AI Chatbot -->
+      <aside class="chat-sidebar" id="chat-sidebar" aria-label="AI Assistant">
+        <header class="chat-head">
+          <div class="panel-title-wrap">
+            <h3 class="chat-title">AI ASSISTANT <span id="ai-model-tag" class="tag" data-state="live">DEEPSEEK</span></h3>
+            <span class="panel-subtitle">TELEMETRY RAG · DEW POINT PHYSICS</span>
+          </div>
+          <button type="button" id="chat-clear-btn" class="btn-text" title="Clear chat history">CLEAR</button>
+        </header>
+
+        <div class="chat-context-bar">
+          <span class="mono-dim">CONTEXT:</span>
+          <b id="chat-context-node">ALL STATIONS</b>
+        </div>
+
+        <div class="chat-messages" id="chat-messages" role="log" aria-label="AI chat messages">
+          <div class="chat-msg chat-msg-assistant">
+            <div class="chat-msg-header">
+              <span class="chat-role">[AI]</span>
+            </div>
+            <div class="chat-text">Ready. Ask about network health, hop paths, signal strength, or weather physics (e.g. dew point and rain likelihood).</div>
+          </div>
+        </div>
+
+        <div class="chat-footer">
+          <div class="chat-quick-prompts">
+            <span class="mono-dim prompt-hint">QUICK:</span>
+            <button type="button" class="quick-btn" data-prompt="What is the current health and routing status of the mesh network?">Mesh Status</button>
+            <button type="button" class="quick-btn" data-prompt="Analyze the current readings, signal quality, and trends for the selected station.">Diagnose Station</button>
+            <button type="button" class="quick-btn" data-prompt="Based on the current temperature and humidity readings, is rain likely? Explain the atmospheric physics.">Rain Assessment</button>
+            <button type="button" class="quick-btn" data-prompt="Audit all signal strengths (RSSI), hop counts, and battery levels across stations.">Signal Audit</button>
+          </div>
+          <form id="chat-form" class="chat-input-row">
+            <input type="text" id="chat-input" class="chat-input" placeholder="Ask AI about telemetry, signal, rain..." autocomplete="off" />
+            <button type="submit" id="chat-send-btn" class="chat-send-btn">SEND</button>
+          </form>
+        </div>
+      </aside>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=3.0"></script>
   </body>
 </html>
