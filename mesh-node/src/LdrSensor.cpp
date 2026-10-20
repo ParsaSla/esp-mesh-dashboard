@@ -7,13 +7,14 @@ LdrSensor::LdrSensor(const char *id, std::uint8_t analogPin, bool enabled) : Sen
 bool LdrSensor::begin()
 {
   pinMode(mAnalogPin, INPUT);
+  setInitialized(true);
   return true;
 }
 
 bool LdrSensor::read(SensorReading *readings, std::size_t capacity)
 {
 
-  readings[0] = {getId(), "raw", static_cast<float>(analogRead(mAnalogPin)),
-                 "adc_counts"};
+  readings[0] = {'L', static_cast<float>(analogRead(mAnalogPin))};
+  // Serial.printf("LDR Sensor %s: raw reading = %f\n", getId(), readings[0].value);
   return true;
 }

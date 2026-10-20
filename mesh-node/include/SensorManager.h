@@ -12,6 +12,7 @@ public:
 
   // Constructor
   SensorManager();
+  ~SensorManager();
 
   // Disable copy and assignment
   SensorManager(const SensorManager &) = delete;
@@ -20,9 +21,10 @@ public:
   // Public methods
   bool add(Sensor &sensor);
   bool remove(Sensor &sensor);
+  bool begin();
   std::size_t requiredReadingCount() const;
   bool sampleEnabled(SensorReading *readings, std::size_t capacity);
-  // Sample ready sensors and replace json with a JSON array of their readings.
+  // Sample ready sensors and replace json with a compact ID-to-value object.
   bool getReadingsJson(std::string &json);
 
 private:

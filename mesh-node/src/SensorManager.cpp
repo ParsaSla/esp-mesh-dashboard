@@ -7,71 +7,44 @@
 
 namespace
 {
-  void appendJsonString(std::string &json, const char *value)
+  void appendJsonKey(std::string &json, char key)
   {
     static constexpr char hexDigits[] = "0123456789abcdef";
     json.push_back('"');
 
-    if (value != nullptr)
+    const auto character = static_cast<unsigned char>(key);
+    if (character == '"' || character == '\\')
     {
-      for (const unsigned char *character =
-               reinterpret_cast<const unsigned char *>(value);
-           *character != '\0'; ++character)
-      {
-        switch (*character)
-        {
-        case '"':
-          json += "\\\"";
-          break;
-        case '\\':
-          json += "\\\\";
-          break;
-        case '\b':
-          json += "\\b";
-          break;
-        case '\f':
-          json += "\\f";
-          break;
-        case '\n':
-          json += "\\n";
-          break;
-        case '\r':
-          json += "\\r";
-          break;
-        case '\t':
-          json += "\\t";
-          break;
-        default:
-          if (*character < 0x20)
-          {
-            json += "\\u00";
-            json.push_back(hexDigits[*character >> 4]);
-            json.push_back(hexDigits[*character & 0x0f]);
-          }
-          else
-          {
-            json.push_back(static_cast<char>(*character));
-          }
-          break;
-        }
-      }
+      json.push_back('\\');
+      json.push_back(static_cast<char>(character));
+    }
+    else if (character < 0x20)
+    {
+      json += "\\u00";
+      json.push_back(hexDigits[character >> 4]);
+      json.push_back(hexDigits[character & 0x0f]);
+    }
+    else
+    {
+      json.push_back(key);
     }
 
-    json.push_back('"');
-  }
-
-  void appendOptionalJsonString(std::string &json, const char *value)
-  {
-    if (value == nullptr)
-    {
-      json += "null";
-      return;
-    }
-    appendJsonString(json, value);
+    json += "\":";
   }
 } // namespace
 
 SensorManager::SensorManager() : mSensors{}, mSensorCount(0) {}
+
+SensorManager::~SensorManager()
+{
+  for (std::size_t i = 0; i < mSensorCount; ++i)
+  {
+    if (mSensors[i] != nullptr)
+    {
+      mSensors[i]->end();
+    }
+  }
+}
 
 bool SensorManager::add(Sensor &sensor)
 {
@@ -110,6 +83,18 @@ bool SensorManager::remove(Sensor &sensor)
     }
   }
   return false; // Sensor not found
+}
+
+bool SensorManager::begin()
+{
+  for (std::size_t i = 0; i < mSensorCount; ++i)
+  {
+    if (!mSensors[i]->begin())
+    {
+      return false;
+    }
+  }
+  return true;
 }
 
 std::size_t SensorManager::requiredReadingCount() const
@@ -172,7 +157,7 @@ bool SensorManager::getReadingsJson(std::string &json)
     return false;
   }
 
-  std::string result = "[";
+  std::string result = "{";
   for (std::size_t i = 0; i < readings.size(); ++i)
   {
     if (i != 0)
@@ -181,11 +166,7 @@ bool SensorManager::getReadingsJson(std::string &json)
     }
 
     const SensorReading &reading = readings[i];
-    result += "{\"sensorId\":";
-    appendOptionalJsonString(result, reading.sensorId);
-    result += ",\"channel\":";
-    appendOptionalJsonString(result, reading.channel);
-    result += ",\"value\":";
+    appendJsonKey(result, reading.id);
     if (std::isfinite(reading.value))
     {
       char value[32];
@@ -201,11 +182,8 @@ bool SensorManager::getReadingsJson(std::string &json)
     {
       result += "null";
     }
-    result += ",\"unit\":";
-    appendOptionalJsonString(result, reading.unit);
-    result.push_back('}');
   }
-  result.push_back(']');
+  result.push_back('}');
 
   json.swap(result);
   return true;

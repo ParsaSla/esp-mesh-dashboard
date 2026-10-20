@@ -4,10 +4,8 @@
 
 struct SensorReading
 {
-  const char *sensorId;
-  const char *channel;
+  char id;
   float value;
-  const char *unit;
 };
 
 class Sensor
@@ -23,9 +21,7 @@ public:
 
   // Public methods
   virtual std::size_t getReadingCount() const = 0;
-  virtual bool begin() = 0;
   virtual bool read(SensorReading *readings, std::size_t capacity) = 0;
-  virtual bool end() = 0;
 
   // Accessors
   const char *getId() const { return mId; }
@@ -44,8 +40,13 @@ protected:
     return true;
   }
 
+  void setInitialized(bool initialized) { mInitialized = initialized; }
+
 private:
   // Private members
+  virtual bool begin() = 0;
+  virtual bool end() = 0;
+
   const char *mId;
   bool mEnabled;
   bool mInitialized;

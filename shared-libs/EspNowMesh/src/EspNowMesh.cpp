@@ -13,6 +13,7 @@ namespace
   constexpr uint8_t kBroadcastAddress[6] = {0xff, 0xff, 0xff,
                                             0xff, 0xff, 0xff};
   constexpr size_t kMaxEspNowPacketSize = 250;
+  constexpr uint8_t kMeshWifiChannel = 1; // Use the same channel on every node.
 
   // The whole struct is sent directly, so keep it within the ESP-NOW v1 limit.
   static_assert(sizeof(MeshMessage) <= kMaxEspNowPacketSize,
@@ -78,6 +79,14 @@ bool EspNowMesh::begin()
   if (!WiFi.mode(WIFI_STA))
   {
     Serial.println("EspNowMesh: failed to enable Wi-Fi station mode.");
+    return false;
+  }
+  const esp_err_t setChannelResult =
+      esp_wifi_set_channel(kMeshWifiChannel, WIFI_SECOND_CHAN_NONE);
+  if (setChannelResult != ESP_OK)
+  {
+    Serial.printf("EspNowMesh: failed to set Wi-Fi channel: %s\n",
+                  esp_err_to_name(setChannelResult));
     return false;
   }
   if (esp_wifi_get_mac(WIFI_IF_STA, mMacAddress) != ESP_OK)

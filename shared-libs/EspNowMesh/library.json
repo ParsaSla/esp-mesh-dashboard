@@ -1,0 +1,7 @@
+{
+  "name": "EspNowMesh",
+  "version": "1.0.0",
+  "description": "Shared ESP-NOW mesh transport for the node and observer projects",
+  "frameworks": "arduino",
+  "platforms": "espressif32"
+}
