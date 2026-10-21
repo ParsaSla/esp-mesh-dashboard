@@ -4,6 +4,65 @@
 
 EspNowMesh mesh;
 
+constexpr size_t kMeshPayloadCapacity = 200;
+uint8_t serialMessage[kMeshPayloadCapacity + 1];
+size_t serialMessageLength = 0;
+bool serialMessageOverflow = false;
+
+void relaySerialMessages()
+{
+  while (Serial.available() > 0)
+  {
+    const int incoming = Serial.read();
+    if (incoming < 0)
+    {
+      return;
+    }
+
+    if (incoming == '\n')
+    {
+      if (!serialMessageOverflow)
+      {
+        if (serialMessageLength > 0 &&
+            serialMessage[serialMessageLength - 1] == '\r')
+        {
+          --serialMessageLength;
+        }
+
+        if (serialMessageLength > kMeshPayloadCapacity)
+        {
+          Serial.println("Serial message exceeds mesh payload limit; discarded");
+        }
+        else if (serialMessageLength > 0 &&
+                 !mesh.publish(serialMessage, serialMessageLength))
+        {
+          Serial.println("Failed to queue serial message for mesh");
+        }
+      }
+      else
+      {
+        Serial.println("Serial message exceeds mesh payload limit; discarded");
+      }
+
+      serialMessageLength = 0;
+      serialMessageOverflow = false;
+      continue;
+    }
+
+    if (!serialMessageOverflow)
+    {
+      if (serialMessageLength < sizeof(serialMessage))
+      {
+        serialMessage[serialMessageLength++] = static_cast<uint8_t>(incoming);
+      }
+      else
+      {
+        serialMessageOverflow = true;
+      }
+    }
+  }
+}
+
 void printMessage(const MeshMessage &message,
                   const MeshReceiveInfo &receiveInfo, void *context)
 {
@@ -104,4 +163,5 @@ void setup()
 void loop()
 {
   mesh.update();
+  relaySerialMessages();
 }
