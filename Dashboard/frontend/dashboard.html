@@ -15,6 +15,11 @@
           <p class="rail-sub">OBSERVER CONSOLE</p>
         </header>
 
+        <nav class="view-tabs" aria-label="Dashboard views">
+          <button type="button" id="overview-tab" class="view-tab" aria-pressed="true">OVERVIEW</button>
+          <button type="button" id="compare-tab" class="view-tab" aria-pressed="false">COMPARE NODES</button>
+        </nav>
+
         <nav id="station-rail" class="rail-nav" aria-label="Stations">
           <p class="section-label">STATIONS <span id="rail-count" class="mono-dim">0</span></p>
           <div id="station-list" class="station-list">
@@ -43,11 +48,6 @@
         <div id="banner" class="banner" hidden>
           <span id="banner-text"></span>
         </div>
-
-        <nav class="view-tabs" aria-label="Dashboard views">
-          <button type="button" id="overview-tab" class="view-tab" aria-pressed="true">OVERVIEW</button>
-          <button type="button" id="compare-tab" class="view-tab" aria-pressed="false">COMPARE NODES</button>
-        </nav>
 
         <div id="overview-view">
         <section class="mesh-controls" aria-labelledby="mesh-controls-title">

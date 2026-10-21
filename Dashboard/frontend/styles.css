@@ -351,20 +351,24 @@ button, input {
 
 .view-tabs {
   display: flex;
-  gap: var(--sp-md);
+  flex-direction: column;
+  gap: 0;
+  padding: var(--sp-sm) var(--sp-md);
   border-bottom: 1px solid var(--line);
 }
 
 .view-tab {
-  padding: 10px 2px 8px;
+  width: 100%;
+  padding: 8px var(--sp-sm);
   border: 0;
-  border-bottom: 2px solid transparent;
+  border-left: 2px solid transparent;
   background: transparent;
   color: var(--text-faint);
   font-family: var(--font-mono);
   font-size: 0.625rem;
   font-weight: 600;
   letter-spacing: 0.14em;
+  text-align: left;
   cursor: pointer;
 }
 
@@ -374,7 +378,7 @@ button, input {
 }
 
 .view-tab[aria-pressed="true"] {
-  border-bottom-color: var(--warning);
+  border-left-color: var(--warning);
 }
 
 .compare-view {
