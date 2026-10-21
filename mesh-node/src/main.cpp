@@ -4,6 +4,7 @@
 #include "LdrSensor.h"
 #include "EnvironmentalSensor.h"
 
+#include <climits>
 #include <cstring>
 #include <Wire.h>
 
@@ -21,8 +22,10 @@ LdrSensor ldrSensor("ldr1", 35);
 EnvironmentalSensor environmentalSensor("env1");
 
 const char kSendDataCommand[] = "SEND_DATA";
+const char kChangeIntervalCommand[] = "CHANGE_INTERVAL";
 
 unsigned long lastUpdate = 0;
+unsigned long updateInterval = 3000;
 
 void setup()
 {
@@ -65,7 +68,7 @@ void loop()
   mesh.update();
 
   unsigned long currentTime = millis();
-  if (currentTime - lastUpdate >= 3000)
+  if (currentTime - lastUpdate >= updateInterval)
   {
     std::string *message = new std::string();
     sensorManager.getReadingsJson(*message);
@@ -104,6 +107,37 @@ void processMessage(const MeshMessage &message,
       std::memcmp(message.payload, kSendDataCommand, message.payloadLength) == 0)
   {
     sendReadings();
+  }
+
+  const size_t commandLength = sizeof(kChangeIntervalCommand) - 1;
+  if (message.payloadLength > commandLength + 1 &&
+      std::memcmp(message.payload, kChangeIntervalCommand,
+                  commandLength) == 0 &&
+      message.payload[commandLength] == ' ')
+  {
+    unsigned long requestedInterval = 0;
+    bool validInterval = true;
+    for (size_t i = commandLength + 1; i < message.payloadLength; ++i)
+    {
+      if (message.payload[i] < '0' || message.payload[i] > '9')
+      {
+        validInterval = false;
+        break;
+      }
+      const unsigned long digit = message.payload[i] - '0';
+      if (requestedInterval > (ULONG_MAX - digit) / 10)
+      {
+        validInterval = false;
+        break;
+      }
+      requestedInterval = requestedInterval * 10 + digit;
+    }
+
+    if (validInterval && requestedInterval > 0)
+    {
+      updateInterval = requestedInterval;
+      Serial.printf("Update interval set to %lu ms\n", updateInterval);
+    }
   }
 
   Serial.printf("Received from %02X:%02X:%02X:%02X:%02X:%02X, RSSI ",
