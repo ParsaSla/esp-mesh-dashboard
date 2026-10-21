@@ -6,7 +6,9 @@
 
 #include <climits>
 #include <cstring>
+#include <limits>
 #include <Wire.h>
+#include <esp_sleep.h>
 
 #define SDA 18
 #define SCL 19
@@ -23,6 +25,7 @@ EnvironmentalSensor environmentalSensor("env1");
 
 const char kSendDataCommand[] = "SEND_DATA";
 const char kChangeIntervalCommand[] = "CHANGE_INTERVAL";
+const char kDeepSleepCommand[] = "DEEP_SLEEP";
 
 unsigned long lastUpdate = 0;
 unsigned long updateInterval = 3000;
@@ -162,4 +165,53 @@ void processMessage(const MeshMessage &message,
     Serial.write(message.payload[i]);
   }
   Serial.println();
+
+  const size_t sleepCommandLength = sizeof(kDeepSleepCommand) - 1;
+  if (message.payloadLength > sleepCommandLength + 1 &&
+      std::memcmp(message.payload, kDeepSleepCommand, sleepCommandLength) == 0 &&
+      message.payload[sleepCommandLength] == ' ')
+  {
+    uint64_t requestedSleepMs = 0;
+    bool validSleepDuration = true;
+    for (size_t i = sleepCommandLength + 1; i < message.payloadLength; ++i)
+    {
+      if (message.payload[i] < '0' || message.payload[i] > '9')
+      {
+        validSleepDuration = false;
+        break;
+      }
+      const uint64_t digit = message.payload[i] - '0';
+      if (requestedSleepMs >
+          (std::numeric_limits<uint64_t>::max() - digit) / 10)
+      {
+        validSleepDuration = false;
+        break;
+      }
+      requestedSleepMs = requestedSleepMs * 10 + digit;
+    }
+
+    if (validSleepDuration && requestedSleepMs > 0 &&
+        requestedSleepMs <= std::numeric_limits<uint64_t>::max() / 1000)
+    {
+      const uint64_t sleepDurationUs = requestedSleepMs * 1000;
+      const esp_err_t sleepTimerResult =
+          esp_sleep_enable_timer_wakeup(sleepDurationUs);
+      if (sleepTimerResult != ESP_OK)
+      {
+        Serial.printf("Failed to configure deep sleep timer: %s\n",
+                      esp_err_to_name(sleepTimerResult));
+      }
+      else
+      {
+        Serial.printf("Entering deep sleep for %llu ms\n",
+                      static_cast<unsigned long long>(requestedSleepMs));
+        Serial.flush();
+        esp_deep_sleep_start();
+      }
+    }
+    else
+    {
+      Serial.println("Invalid DEEP_SLEEP duration; expected milliseconds > 0");
+    }
+  }
 }
