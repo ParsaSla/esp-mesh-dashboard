@@ -13,6 +13,20 @@ const els = {
   gwPill: document.getElementById("gw-pill"),
   banner: document.getElementById("banner"),
   bannerText: document.getElementById("banner-text"),
+  requestDataBtn: document.getElementById("request-data-btn"),
+  intervalForm: document.getElementById("interval-form"),
+  intervalSeconds: document.getElementById("interval-seconds"),
+  intervalApplyBtn: document.getElementById("interval-apply-btn"),
+  deepSleepForm: document.getElementById("deep-sleep-form"),
+  deepSleepSeconds: document.getElementById("deep-sleep-seconds"),
+  deepSleepBtn: document.getElementById("deep-sleep-btn"),
+  autoSleepForm: document.getElementById("auto-sleep-form"),
+  autoSleepSeconds: document.getElementById("auto-sleep-seconds"),
+  autoWakeGraceSeconds: document.getElementById("auto-wake-grace-seconds"),
+  autoSleepToggleBtn: document.getElementById("auto-sleep-toggle-btn"),
+  autoSleepStatus: document.getElementById("auto-sleep-status"),
+  autoSleepStatusText: document.getElementById("auto-sleep-status-text"),
+  meshCommandStatus: document.getElementById("mesh-command-status"),
   metricGrid: document.getElementById("metric-grid"),
   railCount: document.getElementById("rail-count"),
   railEmpty: document.getElementById("rail-empty"),
@@ -27,6 +41,15 @@ const els = {
   chartNode: document.getElementById("chart-node"),
   chartSeq: document.getElementById("chart-seq"),
   chartLegend: document.getElementById("chart-legend"),
+  overviewTab: document.getElementById("overview-tab"),
+  compareTab: document.getElementById("compare-tab"),
+  overviewView: document.getElementById("overview-view"),
+  compareView: document.getElementById("compare-view"),
+  compareMeasurement: document.getElementById("compare-measurement"),
+  compareCanvas: document.getElementById("compare-chart"),
+  compareChartFrame: document.getElementById("compare-chart-frame"),
+  compareEmpty: document.getElementById("compare-empty"),
+  compareLegend: document.getElementById("compare-legend"),
   updatedAt: document.getElementById("updated-at"),
   chartTable: document.getElementById("chart-table"),
   eventLog: document.getElementById("event-log"),
@@ -54,13 +77,22 @@ const METRICS = [
 
 const state = {
   selected: null,
+  activeView: "overview",
+  compareMetric: null,
   nodes: new Map(),
   samples: new Map(),
+  historyLoaded: new Set(),
+  historyLoading: new Set(),
   health: null,
   wsOpen: false,
   chatHistory: [],
   chatLoading: false,
   chatScope: "selected",
+  meshCommandBusy: false,
+  autoSleep: null,
+  autoSleepStatusError: null,
+  autoSleepRequestBusy: false,
+  autoSleepStatusRequestBusy: false,
 };
 
 /* ---------- helpers ---------- */
@@ -142,6 +174,8 @@ function renderStatus() {
   else if (h && !h.gatewayConnected) {
     text = `Mesh gateway offline${h.gatewayMessage ? ` — ${h.gatewayMessage}` : ""}`;
   }
+  updateMeshControls();
+  renderAutoSleepStatus();
   if (!text) {
     els.banner.hidden = true;
     return;
@@ -149,6 +183,207 @@ function renderStatus() {
   els.banner.hidden = false;
   els.banner.dataset.kind = state.wsOpen ? "warning" : "stale";
   els.bannerText.textContent = text;
+}
+
+function updateMeshControls() {
+  const enabled = Boolean(state.health && state.health.gatewayConnected) &&
+    !state.meshCommandBusy && !state.autoSleepRequestBusy &&
+    !(state.autoSleep && state.autoSleep.active);
+  if (els.requestDataBtn) els.requestDataBtn.disabled = !enabled;
+  if (els.intervalApplyBtn) els.intervalApplyBtn.disabled = !enabled;
+  if (els.deepSleepBtn) els.deepSleepBtn.disabled = !enabled;
+  if (
+    els.meshCommandStatus &&
+    !state.meshCommandBusy &&
+    ["gateway unavailable", "ready"].includes(els.meshCommandStatus.textContent)
+  ) {
+    els.meshCommandStatus.textContent = enabled ? "ready" : "gateway unavailable";
+  }
+}
+
+function renderAutoSleepStatus() {
+  const cycle = state.autoSleep;
+  const active = Boolean(cycle && cycle.active);
+  const connected = Boolean(state.health && state.health.gatewayConnected);
+  if (els.autoSleepToggleBtn) {
+    els.autoSleepToggleBtn.disabled = state.autoSleepRequestBusy || (!active && !connected);
+    els.autoSleepToggleBtn.textContent = active ? "STOP AUTO MODE" : "START AUTO MODE";
+  }
+  if (els.autoSleepSeconds) els.autoSleepSeconds.disabled = active || state.autoSleepRequestBusy;
+  if (els.autoWakeGraceSeconds) els.autoWakeGraceSeconds.disabled = active || state.autoSleepRequestBusy;
+  if (!els.autoSleepStatus) return;
+
+  if (active) {
+    els.autoSleepSeconds.value = String(cycle.sleepMs / 1000);
+    els.autoWakeGraceSeconds.value = String(cycle.wakeGraceMs / 1000);
+  }
+  let phase = "stopped";
+  let statusText = "AUTO MODE OFF";
+  if (active && cycle.status === "wake_grace") {
+    phase = "awake";
+    statusText = `AWAKE · WAITING ${cycle.wakeGraceMs / 1000} SEC BEFORE SLEEP`;
+  } else if (active && cycle.status === "sending_sleep") {
+    phase = "sleeping";
+    statusText = "SENDING SLEEP COMMAND…";
+  } else if (active) {
+    phase = "sleeping";
+    statusText = `SLEEPING · ${cycle.sleepMs / 1000} SEC · WAKE WAIT ${cycle.wakeGraceMs / 1000} SEC`;
+  } else if (state.autoSleepStatusError) {
+    phase = "error";
+    statusText = `STATUS ERROR · ${state.autoSleepStatusError}`;
+  } else if (cycle && cycle.status === "error") {
+    phase = "error";
+    statusText = `STOPPED · ${cycle.error || "GATEWAY ERROR"}`;
+  }
+  if (els.autoSleepStatus) els.autoSleepStatus.dataset.phase = phase;
+  if (els.autoSleepStatusText) {
+    els.autoSleepStatusText.textContent = statusText;
+  }
+  const control = els.autoSleepStatus && els.autoSleepStatus.closest(".auto-sleep-control");
+  if (control) {
+    control.dataset.phase = phase;
+  }
+}
+
+async function refreshAutoSleepStatus() {
+  if (state.autoSleepRequestBusy || state.autoSleepStatusRequestBusy) return;
+  state.autoSleepStatusRequestBusy = true;
+  try {
+    const res = await fetch("/api/mesh/auto-sleep");
+    const result = await res.json();
+    if (!res.ok) throw new Error(result.detail || `HTTP ${res.status}`);
+    state.autoSleep = result;
+    state.autoSleepStatusError = null;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to read auto mode status.";
+    state.autoSleepStatusError = `status unavailable: ${message}`;
+  } finally {
+    state.autoSleepStatusRequestBusy = false;
+    renderAutoSleepStatus();
+    updateMeshControls();
+  }
+}
+
+async function toggleAutoSleep(event) {
+  event.preventDefault();
+  const active = Boolean(state.autoSleep && state.autoSleep.active);
+  let options = { method: "DELETE" };
+  if (!active) {
+    const sleepMs = secondsToMilliseconds(els.autoSleepSeconds.value);
+    const wakeGraceMs = secondsToMilliseconds(els.autoWakeGraceSeconds.value, true);
+    if (sleepMs === null || sleepMs < 1) {
+      state.autoSleepStatusError = "sleep time must be 0.001–4294967.295 seconds";
+      renderAutoSleepStatus();
+      return;
+    }
+    if (wakeGraceMs === null) {
+      state.autoSleepStatusError = "wake-up wait must be 0–4294967.295 seconds";
+      renderAutoSleepStatus();
+      return;
+    }
+    options = {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sleepMs, wakeGraceMs }),
+    };
+  }
+
+  state.autoSleepRequestBusy = true;
+  renderAutoSleepStatus();
+  try {
+    const res = await fetch("/api/mesh/auto-sleep", options);
+    const result = await res.json();
+    if (!res.ok) throw new Error(result.detail || `HTTP ${res.status}`);
+    state.autoSleep = result;
+    state.autoSleepStatusError = null;
+    pushLog("info", "mesh", active ? "Auto sleep mode stopped." : "Auto sleep mode started.");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Auto mode request failed.";
+    state.autoSleepStatusError = `request failed: ${message}`;
+    renderAutoSleepStatus();
+    pushLog("dropped", "mesh", `auto mode failed: ${message}`);
+  } finally {
+    state.autoSleepRequestBusy = false;
+    renderAutoSleepStatus();
+    updateMeshControls();
+  }
+}
+
+function secondsToMilliseconds(value, allowZero = false) {
+  const seconds = Number(value);
+  const minSeconds = allowZero ? 0 : 0.001;
+  if (!Number.isFinite(seconds) || seconds < minSeconds || seconds > 4294967.295) {
+    return null;
+  }
+  const milliseconds = seconds * 1000;
+  const rounded = Math.round(milliseconds);
+  return Math.abs(milliseconds - rounded) < 1e-7 ? rounded : null;
+}
+
+async function sendMeshCommand(command, milliseconds) {
+  state.meshCommandBusy = true;
+  updateMeshControls();
+  els.meshCommandStatus.textContent = "sending…";
+  try {
+    const body = { command };
+    if (command === "CHANGE_INTERVAL") body.intervalMs = milliseconds;
+    if (command === "DEEP_SLEEP") body.sleepMs = milliseconds;
+    const res = await fetch("/api/mesh/commands", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const result = await res.json();
+    if (!res.ok) throw new Error(result.detail || `HTTP ${res.status}`);
+    const status = command === "SEND_DATA"
+      ? "SEND_DATA sent to observer; awaiting node telemetry."
+      : command === "CHANGE_INTERVAL"
+        ? `Report interval ${milliseconds / 1000} sec sent to observer.`
+        : `DEEP_SLEEP ${milliseconds / 1000} sec sent to observer.`;
+    els.meshCommandStatus.textContent = status;
+    pushLog("info", "mesh", status);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Command failed.";
+    els.meshCommandStatus.textContent = `Command failed: ${message}`;
+    pushLog("dropped", "mesh", `command failed: ${message}`);
+  } finally {
+    state.meshCommandBusy = false;
+    updateMeshControls();
+  }
+}
+
+function initMeshControls() {
+  if (els.requestDataBtn) {
+    els.requestDataBtn.addEventListener("click", () => sendMeshCommand("SEND_DATA"));
+  }
+  if (els.intervalForm) {
+    els.intervalForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const intervalMs = secondsToMilliseconds(els.intervalSeconds.value);
+      if (intervalMs === null || intervalMs < 1) {
+        els.meshCommandStatus.textContent = "Enter an interval from 0.001 to 4294967.295 seconds.";
+        return;
+      }
+      sendMeshCommand("CHANGE_INTERVAL", intervalMs);
+    });
+  }
+  if (els.deepSleepForm) {
+    els.deepSleepForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const sleepMs = secondsToMilliseconds(els.deepSleepSeconds.value);
+      if (sleepMs === null || sleepMs < 1) {
+        els.meshCommandStatus.textContent = "Enter a sleep duration from 0.001 to 4294967.295 seconds.";
+        return;
+      }
+      sendMeshCommand("DEEP_SLEEP", sleepMs);
+    });
+  }
+  if (els.autoSleepForm) {
+    els.autoSleepForm.addEventListener("submit", toggleAutoSleep);
+  }
+  refreshAutoSleepStatus();
+  window.setInterval(refreshAutoSleepStatus, 1000);
+  updateMeshControls();
 }
 
 /* ---------- stations / nodes ---------- */
@@ -718,6 +953,259 @@ function renderChartTable(samples) {
 const resizeObserver = new ResizeObserver(() => scheduleChartDraw());
 resizeObserver.observe(els.chartFrame);
 
+/* ---------- cross-node measurement comparison ---------- */
+
+const compareContext = els.compareCanvas.getContext("2d");
+const COMPARE_PALETTE = [
+  "--color-series-temp",
+  "--color-series-humidity",
+  "--color-compare-3",
+  "--color-compare-4",
+  "--color-compare-5",
+  "--color-compare-6",
+  "--color-compare-7",
+  "--color-compare-8",
+];
+const NON_MEASUREMENT_KEYS = new Set([
+  "__t", "timestamp", "sequence", "bootId", "rssi", "rssiSourceNodeId", "hops",
+  "ttl", "sender", "destination", "packetPayload", "units",
+]);
+let compareRaf = null;
+
+function comparisonMetrics() {
+  const keys = new Set();
+  for (const samples of state.samples.values()) {
+    for (const sample of samples) {
+      for (const [key, value] of Object.entries(sample)) {
+        if (!NON_MEASUREMENT_KEYS.has(key) && Number.isFinite(value)) keys.add(key);
+      }
+    }
+  }
+  return [...keys].sort((a, b) => {
+    const priority = (key) => {
+      const code = metricCode(key);
+      if (code === "T" || key.toLowerCase().includes("temp")) return 0;
+      if (code === "H" || key.toLowerCase().includes("hum")) return 1;
+      if (code === "P" || key.toLowerCase().includes("press")) return 2;
+      if (code === "L" || key.toLowerCase().includes("ldr")) return 3;
+      return 4;
+    };
+    return priority(a) - priority(b) || a.localeCompare(b);
+  });
+}
+
+function comparisonUnit(key) {
+  for (const [nodeId, samples] of state.samples) {
+    if (samples.some((sample) => Number.isFinite(sample[key]))) {
+      const sampleUnits = samples[samples.length - 1]?.units || {};
+      const nodeUnits = state.nodes.get(nodeId)?.units || {};
+      const code = metricCode(key);
+      return ["L", "T", "H", "P"].includes(code)
+        ? metricDefaultUnit(key)
+        : sampleUnits[key] || nodeUnits[key] || metricDefaultUnit(key);
+    }
+  }
+  return metricDefaultUnit(key);
+}
+
+function renderComparisonControls() {
+  const keys = comparisonMetrics();
+  const previous = state.compareMetric || els.compareMeasurement.value;
+  const preferred = keys.find((key) => {
+    const code = metricCode(key);
+    return code === "T" || key.toLowerCase().includes("temp");
+  });
+  const selected = keys.includes(previous) ? previous : preferred || keys[0] || "";
+  state.compareMetric = selected || null;
+
+  const options = document.createDocumentFragment();
+  if (!keys.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "WAITING FOR MEASUREMENTS";
+    options.appendChild(option);
+  } else {
+    for (const key of keys) {
+      const option = document.createElement("option");
+      option.value = key;
+      const unit = comparisonUnit(key);
+      option.textContent = `${formatMetricLabel(key)}${unit ? ` (${unit})` : ""}`;
+      options.appendChild(option);
+    }
+  }
+  els.compareMeasurement.replaceChildren(options);
+  els.compareMeasurement.value = selected;
+  els.compareMeasurement.disabled = !keys.length;
+}
+
+function scheduleComparisonDraw() {
+  if (compareRaf) return;
+  compareRaf = requestAnimationFrame(() => {
+    compareRaf = null;
+    drawComparisonChart();
+  });
+}
+
+function drawComparisonChart() {
+  const canvas = els.compareCanvas;
+  const frame = els.compareChartFrame;
+  const width = frame.clientWidth;
+  const height = frame.clientHeight;
+  const dpr = window.devicePixelRatio || 1;
+  const pixelWidth = Math.max(1, Math.round(width * dpr));
+  const pixelHeight = Math.max(1, Math.round(height * dpr));
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth;
+    canvas.height = pixelHeight;
+  }
+  compareContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+  compareContext.clearRect(0, 0, width, height);
+
+  const key = els.compareMeasurement.value;
+  const nodes = [...state.nodes.keys()].sort((a, b) => a.localeCompare(b));
+  const series = nodes.map((nodeId, index) => ({
+    nodeId,
+    color: token(COMPARE_PALETTE[index % COMPARE_PALETTE.length], "#a8a69b"),
+    samples: (state.samples.get(nodeId) || []).filter(
+      (sample) => Number.isFinite(sample.__t) && Number.isFinite(sample[key])
+    ),
+  })).filter((item) => item.samples.length);
+  const allSamples = series.flatMap((item) => item.samples);
+
+  if (!allSamples.length) {
+    els.compareEmpty.textContent = nodes.length
+      ? (key ? "no node has reported this measurement yet" : "waiting for measurement history")
+      : "no nodes are reporting";
+    els.compareEmpty.style.display = "flex";
+    els.compareLegend.replaceChildren();
+    canvas.setAttribute("aria-label", "No data available for the selected measurement");
+    return;
+  }
+
+  els.compareEmpty.style.display = "none";
+  const lo = Math.min(...allSamples.map((sample) => sample.__t));
+  const hi = Math.max(...allSamples.map((sample) => sample.__t));
+  const span = Math.max(3000, hi - lo);
+  const values = allSamples.map((sample) => sample[key]);
+  const minValue = Math.min(...values);
+  const maxValue = Math.max(...values);
+  const unit = comparisonUnit(key);
+  const ticks = calculateNiceScale(minValue, maxValue, 5, Boolean(unit && unit.includes("%")) || minValue >= 0);
+  const minY = ticks[0];
+  const maxY = ticks[ticks.length - 1];
+  const pad = { l: 58, r: 16, t: 22, b: 32 };
+  const plotWidth = Math.max(1, width - pad.l - pad.r);
+  const plotHeight = Math.max(1, height - pad.t - pad.b);
+  const x = (timestamp) => pad.l + ((timestamp - lo) / span) * plotWidth;
+  const y = (value) => height - pad.b - ((value - minY) / Math.max(1e-9, maxY - minY)) * plotHeight;
+  const grid = token("--line", "#2e3237");
+  const faint = token("--text-faint", "#8a897f");
+  const font = token("--font-mono", "monospace");
+
+  compareContext.font = `10px ${font}`;
+  compareContext.lineWidth = 1;
+  compareContext.strokeStyle = grid;
+  compareContext.fillStyle = faint;
+  compareContext.textAlign = "right";
+  ticks.forEach((tick) => {
+    const py = y(tick);
+    compareContext.beginPath();
+    compareContext.moveTo(pad.l, py);
+    compareContext.lineTo(width - pad.r, py);
+    compareContext.stroke();
+    compareContext.fillText(String(Number(tick.toPrecision(4))), pad.l - 7, py + 3);
+  });
+
+  compareContext.textAlign = "center";
+  const xCount = Math.min(6, Math.max(3, Math.floor(plotWidth / 100)));
+  for (let i = 0; i <= xCount; i++) {
+    const timestamp = lo + (span * i) / xCount;
+    const px = x(timestamp);
+    compareContext.fillText(fmtClock(timestamp, span <= 3600000), px, height - 9);
+  }
+  compareContext.textAlign = "left";
+  compareContext.fillText(unit || "", pad.l, 12);
+
+  for (const item of series) {
+    const med = medianInterval(item.samples);
+    compareContext.save();
+    compareContext.beginPath();
+    compareContext.rect(pad.l, pad.t, plotWidth, plotHeight);
+    compareContext.clip();
+    compareContext.strokeStyle = item.color;
+    compareContext.lineWidth = 1.8;
+    let pen = false;
+    for (let index = 0; index < item.samples.length; index++) {
+      const sample = item.samples[index];
+      const previous = item.samples[index - 1];
+      const gap = previous && sample.__t - previous.__t > GAP_FACTOR * med;
+      if (!pen || gap) {
+        compareContext.beginPath();
+        compareContext.moveTo(x(sample.__t), y(sample[key]));
+        pen = true;
+      } else {
+        compareContext.lineTo(x(sample.__t), y(sample[key]));
+      }
+      compareContext.stroke();
+    }
+    compareContext.restore();
+  }
+
+  const legend = document.createDocumentFragment();
+  for (const item of series) {
+    const entry = document.createElement("span");
+    entry.className = "legend-item";
+    const swatch = document.createElement("i");
+    swatch.className = "legend-swatch";
+    swatch.style.backgroundColor = item.color;
+    const label = document.createElement("span");
+    label.textContent = item.nodeId;
+    entry.append(swatch, label);
+    legend.appendChild(entry);
+  }
+  els.compareLegend.replaceChildren(legend);
+  canvas.setAttribute(
+    "aria-label",
+    `${formatMetricLabel(key)} comparison across ${series.length} nodes`
+  );
+}
+
+async function loadComparisonHistories() {
+  renderComparisonControls();
+  const missing = [...state.nodes.keys()].filter(
+    (nodeId) => !state.historyLoaded.has(nodeId) && !state.historyLoading.has(nodeId)
+  );
+  await Promise.all(missing.map((nodeId) => loadHistory(nodeId)));
+  renderComparisonControls();
+  scheduleComparisonDraw();
+}
+
+function setActiveView(view) {
+  state.activeView = view;
+  const compare = view === "compare";
+  els.overviewTab.setAttribute("aria-pressed", String(!compare));
+  els.compareTab.setAttribute("aria-pressed", String(compare));
+  els.overviewView.hidden = compare;
+  els.compareView.hidden = !compare;
+  if (compare) {
+    loadComparisonHistories();
+    scheduleComparisonDraw();
+  } else {
+    scheduleChartDraw();
+  }
+}
+
+function initComparisonView() {
+  els.overviewTab.addEventListener("click", () => setActiveView("overview"));
+  els.compareTab.addEventListener("click", () => setActiveView("compare"));
+  els.compareMeasurement.addEventListener("change", () => {
+    state.compareMetric = els.compareMeasurement.value || null;
+    scheduleComparisonDraw();
+  });
+  const compareResizeObserver = new ResizeObserver(scheduleComparisonDraw);
+  compareResizeObserver.observe(els.compareChartFrame);
+}
+
 /* ---------- automated insights ---------- */
 
 async function loadInsights(nodeId) {
@@ -873,6 +1361,8 @@ function selectStation(id) {
 }
 
 async function loadHistory(nodeId) {
+  if (state.historyLoaded.has(nodeId) || state.historyLoading.has(nodeId)) return;
+  state.historyLoading.add(nodeId);
   let parsed;
   try {
     const res = await fetch(`/nodes/${encodeURIComponent(nodeId)}/history?limit=200`);
@@ -881,6 +1371,8 @@ async function loadHistory(nodeId) {
   } catch {
     pushLog("dropped", nodeId, "history request failed");
     return;
+  } finally {
+    state.historyLoading.delete(nodeId);
   }
   const raw = Array.isArray(parsed && parsed.samples) ? parsed.samples : [];
   const samples = raw
@@ -904,9 +1396,15 @@ async function loadHistory(nodeId) {
       return obj;
     })
     .filter((s) => Number.isFinite(s.__t))
-    .sort((a, b) => a.__t - b.__t);
+    .concat(state.samples.get(nodeId) || []);
+  const mergedSamples = [...new Map(samples.map((sample) => [sample.__t, sample])).values()]
+    .sort((a, b) => a.__t - b.__t)
+    .slice(-MAX_SAMPLES);
 
-  state.samples.set(nodeId, samples);
+  state.samples.set(nodeId, mergedSamples);
+  state.historyLoaded.add(nodeId);
+  renderComparisonControls();
+  if (state.activeView === "compare") scheduleComparisonDraw();
   if (state.selected === nodeId) {
     applyStation();
     loadInsights(nodeId);
@@ -922,17 +1420,20 @@ async function refreshNodes() {
   } catch {
     return;
   }
-  (Array.isArray(parsed.nodes) ? parsed.nodes : []).forEach((n) => upsertNode(n));
+  const nodes = Array.isArray(parsed.nodes) ? parsed.nodes : [];
+  nodes.forEach((n) => upsertNode(n));
   renderRoster();
   renderHealth();
-  if (!state.selected && parsed.nodes.length) {
-    state.selected = parsed.nodes[0].nodeId;
+  if (!state.selected && nodes.length) {
+    state.selected = nodes[0].nodeId;
     applyStation();
     loadHistory(state.selected);
     loadInsights(state.selected);
   } else if (state.selected && state.nodes.has(state.selected)) {
     renderMetrics();
   }
+  renderComparisonControls();
+  if (state.activeView === "compare") loadComparisonHistories();
 }
 
 async function refreshHealth() {
@@ -1030,6 +1531,14 @@ function onTelemetry(msg) {
   if (arr.length > MAX_SAMPLES) arr.splice(0, arr.length - MAX_SAMPLES);
   state.samples.set(msg.nodeId, arr);
 
+  renderComparisonControls();
+  if (state.activeView === "compare") {
+    scheduleComparisonDraw();
+    if (!state.historyLoaded.has(msg.nodeId) && !state.historyLoading.has(msg.nodeId)) {
+      loadHistory(msg.nodeId);
+    }
+  }
+
   renderRoster();
   renderHealth();
   if (!state.selected) {
@@ -1069,14 +1578,14 @@ function onTelemetry(msg) {
 setInterval(() => {
   renderRoster();
   renderMetrics();
-}, 5000);
-setInterval(refreshHealth, 10000);
-setInterval(refreshNodes, 30000);
+}, 1000);
+setInterval(refreshHealth, 2000);
+setInterval(refreshNodes, 5000);
 setInterval(() => {
   if (state.selected) {
     loadInsights(state.selected);
   }
-}, 30000);
+}, 10000);
 
 
 /* ---------- ai assistant chat ---------- */
@@ -1237,6 +1746,8 @@ function initChatEvents() {
 refreshHealth().then(refreshNodes).then(() => {
   applyStation();
   drawChart();
+  initComparisonView();
+  initMeshControls();
   initChatEvents();
   connectSocket();
 });

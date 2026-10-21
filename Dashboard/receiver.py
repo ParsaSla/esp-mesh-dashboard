@@ -1,5 +1,6 @@
 import os
 import socket
+import threading
 from collections.abc import MutableSet
 
 from history import HistoryBuffer
@@ -13,7 +14,32 @@ class MeshReceiver:
         self.connected = False
         self.gateway_message = "Gateway not configured"
         self.transport = None
+        self.transport_write_lock = threading.Lock()
         self.websocket_clients = set()
+
+    def write_command(self, command):
+        with self.transport_write_lock:
+            transport = self.transport
+            if not self.connected or transport is None:
+                raise ConnectionError("Mesh gateway is not connected")
+
+            payload = f"{command}\n".encode("ascii")
+            write = getattr(transport, "write", None)
+            if callable(write):
+                written = write(payload)
+                if written != len(payload):
+                    raise OSError("Incomplete command write to serial gateway")
+                flush = getattr(transport, "flush", None)
+                if callable(flush):
+                    flush()
+                return
+
+            sendall = getattr(transport, "sendall", None)
+            if callable(sendall):
+                sendall(payload)
+                return
+
+            raise OSError("Configured gateway transport cannot send commands")
 
     def add_client(self, websocket):
         self.websocket_clients.add(websocket)

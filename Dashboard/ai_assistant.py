@@ -27,13 +27,30 @@ def calculate_dew_point(temperature: float, humidity: float) -> Optional[float]:
 
 
 def get_ai_config() -> Dict[str, Any]:
+    provider = os.getenv("AI_PROVIDER", "deepseek").strip().lower()
     api_key = os.getenv("AI_API_KEY", "").strip()
-    base_url = os.getenv("AI_BASE_URL", "https://api.deepseek.com").strip().rstrip("/")
-    model = os.getenv("AI_MODEL", "deepseek-chat").strip()
+    default_base_url = (
+        "https://opencode.ai/inference/openai/v1"
+        if provider == "opencode"
+        else "https://api.deepseek.com"
+    )
+    default_model = "deepseek-v4.1-flash-free" if provider == "opencode" else "deepseek-chat"
+    base_url = os.getenv("AI_BASE_URL", default_base_url).strip().rstrip("/")
+    model = os.getenv("AI_MODEL", default_model).strip()
+    if provider == "opencode":
+        api_format = (
+            "chat_completions"
+            if model == "deepseek-v4.1-flash-free"
+            else "responses"
+        )
+    else:
+        api_format = "chat_completions"
     return {
         "api_key": api_key,
         "base_url": base_url,
         "model": model,
+        "provider": provider,
+        "api_format": api_format,
         "configured": bool(api_key),
     }
 
@@ -187,8 +204,8 @@ async def ask_mesh_ai(
         return {
             "configured": False,
             "reply": (
-                "AI Assistant is not configured. Please add `AI_API_KEY` (e.g. DeepSeek or OpenAI key) "
-                "to `Dashboard/.env` to enable real-time conversational analysis."
+                "AI Assistant is not configured. Add your provider API key as `AI_API_KEY` in "
+                "`Dashboard/.env` to enable real-time conversational analysis."
             ),
             "grounding": grounding,
         }
@@ -206,17 +223,29 @@ async def ask_mesh_ai(
 
     messages.append({"role": "user", "content": message.strip()})
 
-    url = f"{config['base_url']}/chat/completions"
+    api_format = config["api_format"]
+    url = (
+        f"{config['base_url']}/responses"
+        if api_format == "responses"
+        else f"{config['base_url']}/chat/completions"
+    )
     headers = {
         "Authorization": f"Bearer {config['api_key']}",
         "Content-Type": "application/json",
     }
-    payload = {
-        "model": config["model"],
-        "messages": messages,
-        "max_tokens": 800,
-        "temperature": 0.3,
-    }
+    if api_format == "responses":
+        payload = {
+            "model": config["model"],
+            "input": messages,
+            "max_output_tokens": 800,
+        }
+    else:
+        payload = {
+            "model": config["model"],
+            "messages": messages,
+            "max_tokens": 800,
+            "temperature": 0.3,
+        }
 
     own_client = False
     if client is None:
@@ -227,7 +256,18 @@ async def ask_mesh_ai(
         response = await client.post(url, headers=headers, json=payload)
         response.raise_for_status()
         data = response.json()
-        reply_text = data["choices"][0]["message"]["content"]
+        if api_format == "responses":
+            reply_text = "\n".join(
+                content["text"]
+                for item in data.get("output", [])
+                if item.get("type") == "message"
+                for content in item.get("content", [])
+                if content.get("type") == "output_text" and content.get("text")
+            )
+            if not reply_text:
+                raise ValueError("AI provider returned no assistant text in the Responses API result")
+        else:
+            reply_text = data["choices"][0]["message"]["content"]
         return {
             "configured": True,
             "reply": reply_text,

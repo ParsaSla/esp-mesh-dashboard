@@ -7,13 +7,13 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from ai_assistant import ask_mesh_ai, get_ai_config
 from insights import calculate_insights
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from receiver import MeshReceiver
 
 logger = logging.getLogger("esp_mesh_dashboard")
@@ -21,6 +21,74 @@ logger = logging.getLogger("esp_mesh_dashboard")
 BASE_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 receiver = MeshReceiver()
+
+
+class AutoSleepCycle:
+    def __init__(self, mesh_receiver):
+        self.receiver = mesh_receiver
+        self.sleep_ms = None
+        self.wake_grace_ms = None
+        self.status = "stopped"
+        self.last_error = None
+        self.task = None
+
+    def snapshot(self):
+        active = self.task is not None and not self.task.done()
+        return {
+            "active": active,
+            "status": self.status,
+            "sleepMs": self.sleep_ms,
+            "wakeGraceMs": self.wake_grace_ms,
+            "error": self.last_error,
+        }
+
+    def start(self, sleep_ms, wake_grace_ms):
+        if self.task is not None and not self.task.done():
+            raise ValueError("Auto sleep mode is already running")
+
+        self.receiver.write_command(f"DEEP_SLEEP {sleep_ms}")
+        self.sleep_ms = sleep_ms
+        self.wake_grace_ms = wake_grace_ms
+        self.last_error = None
+        self.status = "sleeping"
+        self.task = asyncio.create_task(self._run())
+        return self.snapshot()
+
+    async def stop(self):
+        task = self.task
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self.task = None
+        self.status = "stopped"
+        return self.snapshot()
+
+    async def _run(self):
+        try:
+            while True:
+                await asyncio.sleep(self.sleep_ms / 1000)
+                self.status = "wake_grace"
+                await asyncio.sleep(self.wake_grace_ms / 1000)
+                self.status = "sending_sleep"
+                self.receiver.write_command(f"DEEP_SLEEP {self.sleep_ms}")
+                self.status = "sleeping"
+        except asyncio.CancelledError:
+            self.status = "stopped"
+            raise
+        except (ConnectionError, OSError) as exc:
+            logger.warning("Auto sleep cycle stopped after a gateway error: %s", exc)
+            self.last_error = str(exc)
+            self.status = "error"
+        finally:
+            self.task = None
+
+
+auto_sleep_cycle = AutoSleepCycle(receiver)
+
+
 def _safe_broadcast(receiver_inst: MeshReceiver, event: dict, loop: asyncio.AbstractEventLoop):
     try:
         if loop.is_running():
@@ -226,11 +294,13 @@ async def lifespan(app_inst: FastAPI):
             daemon=True,
         )
         worker_thread.start()
-    yield
-
-    if worker_thread:
-        stop_event.set()
-        worker_thread.join(timeout=2.0)
+    try:
+        yield
+    finally:
+        await auto_sleep_cycle.stop()
+        if worker_thread:
+            stop_event.set()
+            worker_thread.join(timeout=2.0)
 
 
 app = FastAPI(title="ESP32 Mesh Dashboard", lifespan=lifespan)
@@ -252,6 +322,65 @@ async def index():
 @app.get("/health")
 async def health():
     return receiver.get_health()
+
+
+class MeshCommandRequest(BaseModel):
+    command: Literal["SEND_DATA", "CHANGE_INTERVAL", "DEEP_SLEEP"]
+    intervalMs: Optional[int] = Field(default=None, ge=1, le=4294967295)
+    sleepMs: Optional[int] = Field(default=None, ge=1, le=4294967295)
+
+
+class AutoSleepRequest(BaseModel):
+    sleepMs: int = Field(ge=1, le=4294967295)
+    wakeGraceMs: int = Field(ge=0, le=4294967295)
+
+
+@app.get("/api/mesh/auto-sleep")
+async def get_auto_sleep_status():
+    return auto_sleep_cycle.snapshot()
+
+
+@app.post("/api/mesh/auto-sleep")
+async def start_auto_sleep(request: AutoSleepRequest):
+    try:
+        return auto_sleep_cycle.start(request.sleepMs, request.wakeGraceMs)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ConnectionError, OSError) as exc:
+        logger.warning("Unable to start auto sleep mode: %s", exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.delete("/api/mesh/auto-sleep")
+async def stop_auto_sleep():
+    return await auto_sleep_cycle.stop()
+
+
+@app.post("/api/mesh/commands")
+async def send_mesh_command(request: MeshCommandRequest):
+    if request.command == "SEND_DATA" and (request.intervalMs is not None or request.sleepMs is not None):
+        raise HTTPException(status_code=400, detail="SEND_DATA does not accept a duration")
+    if request.command == "CHANGE_INTERVAL" and request.intervalMs is None:
+        raise HTTPException(status_code=400, detail="CHANGE_INTERVAL requires intervalMs")
+    if request.command == "CHANGE_INTERVAL" and request.sleepMs is not None:
+        raise HTTPException(status_code=400, detail="CHANGE_INTERVAL does not accept sleepMs")
+    if request.command == "DEEP_SLEEP" and request.sleepMs is None:
+        raise HTTPException(status_code=400, detail="DEEP_SLEEP requires sleepMs")
+    if request.command == "DEEP_SLEEP" and request.intervalMs is not None:
+        raise HTTPException(status_code=400, detail="DEEP_SLEEP does not accept intervalMs")
+
+    command = request.command
+    if request.command == "CHANGE_INTERVAL":
+        command = f"CHANGE_INTERVAL {request.intervalMs}"
+    elif request.command == "DEEP_SLEEP":
+        command = f"DEEP_SLEEP {request.sleepMs}"
+
+    try:
+        receiver.write_command(command)
+    except (ConnectionError, OSError) as exc:
+        logger.warning("Unable to send mesh command %s: %s", request.command, exc)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"sent": True, "command": command}
 
 
 @app.get("/nodes")
@@ -314,7 +443,7 @@ async def ai_status():
     return {
         "configured": config["configured"],
         "model": config["model"] if config["configured"] else None,
-        "provider": os.getenv("AI_PROVIDER", "deepseek"),
+        "provider": config["provider"],
     }
 
 
@@ -335,4 +464,3 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
-

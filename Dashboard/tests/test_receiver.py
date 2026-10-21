@@ -1,4 +1,5 @@
 import json
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -125,6 +126,15 @@ def test_api_endpoints_expose_latest_node_state():
     dashboard = client.get("/")
     assert dashboard.status_code == 200
     assert 'id="telemetry-chart"' in dashboard.text
+    assert 'id="mesh-controls-title"' in dashboard.text
+    assert "BROADCAST TO ALL MESH NODES VIA THE OBSERVER" in dashboard.text
+    assert 'id="deep-sleep-form"' in dashboard.text
+    assert 'id="deep-sleep-btn"' in dashboard.text
+    assert 'id="interval-seconds"' in dashboard.text
+    assert 'id="deep-sleep-seconds"' in dashboard.text
+    assert 'id="auto-sleep-seconds"' in dashboard.text
+    assert 'id="auto-wake-grace-seconds"' in dashboard.text
+    assert "REPORT INTERVAL <span>(SECONDS)</span>" in dashboard.text
     assert client.get("/static/app.js").status_code == 200
     assert client.get("/static/styles.css").status_code == 200
 
@@ -139,3 +149,153 @@ def test_api_endpoints_expose_latest_node_state():
     history = client.get("/nodes/node-001/history?limit=10")
     assert history.status_code == 200
     assert history.json()["samples"][0]["sequence"] == 42
+
+
+def test_mesh_command_endpoint_writes_observer_serial_commands(monkeypatch):
+    class FakeSerial:
+        def __init__(self):
+            self.writes = []
+
+        def write(self, payload):
+            self.writes.append(payload)
+            return len(payload)
+
+        def flush(self):
+            pass
+
+    serial = FakeSerial()
+    monkeypatch.setattr(receiver, "transport", serial)
+    monkeypatch.setattr(receiver, "connected", True)
+
+    client = TestClient(app)
+    request_data = client.post("/api/mesh/commands", json={"command": "SEND_DATA"})
+    change_interval = client.post(
+        "/api/mesh/commands",
+        json={"command": "CHANGE_INTERVAL", "intervalMs": 5000},
+    )
+    deep_sleep = client.post(
+        "/api/mesh/commands",
+        json={"command": "DEEP_SLEEP", "sleepMs": 60000},
+    )
+
+    assert request_data.status_code == 200
+    assert request_data.json() == {"sent": True, "command": "SEND_DATA"}
+    assert change_interval.status_code == 200
+    assert change_interval.json() == {"sent": True, "command": "CHANGE_INTERVAL 5000"}
+    assert deep_sleep.status_code == 200
+    assert deep_sleep.json() == {"sent": True, "command": "DEEP_SLEEP 60000"}
+    assert serial.writes == [b"SEND_DATA\n", b"CHANGE_INTERVAL 5000\n", b"DEEP_SLEEP 60000\n"]
+
+
+def test_mesh_command_endpoint_rejects_invalid_or_offline_commands(monkeypatch):
+    monkeypatch.setattr(receiver, "transport", None)
+    monkeypatch.setattr(receiver, "connected", False)
+    client = TestClient(app)
+
+    assert client.post("/api/mesh/commands", json={"command": "SEND_DATA"}).status_code == 503
+    assert client.post(
+        "/api/mesh/commands",
+        json={"command": "CHANGE_INTERVAL", "intervalMs": 0},
+    ).status_code == 422
+    assert client.post(
+        "/api/mesh/commands",
+        json={"command": "CHANGE_INTERVAL"},
+    ).status_code == 400
+    assert client.post(
+        "/api/mesh/commands",
+        json={"command": "DEEP_SLEEP", "sleepMs": 0},
+    ).status_code == 422
+    assert client.post(
+        "/api/mesh/commands",
+        json={"command": "DEEP_SLEEP"},
+    ).status_code == 400
+
+
+def test_auto_sleep_mode_sends_sleep_and_can_be_stopped(monkeypatch):
+    class FakeSerial:
+        def __init__(self):
+            self.writes = []
+
+        def write(self, payload):
+            self.writes.append(payload)
+            return len(payload)
+
+        def flush(self):
+            pass
+
+    serial = FakeSerial()
+    monkeypatch.setattr(receiver, "transport", serial)
+    monkeypatch.setattr(receiver, "connected", True)
+    client = TestClient(app)
+
+    assert client.get("/api/mesh/auto-sleep").json()["active"] is False
+
+    started = client.post(
+        "/api/mesh/auto-sleep",
+        json={"sleepMs": 60000, "wakeGraceMs": 5000},
+    )
+    assert started.status_code == 200
+    assert started.json() == {
+        "active": True,
+        "status": "sleeping",
+        "sleepMs": 60000,
+        "wakeGraceMs": 5000,
+        "error": None,
+    }
+    assert serial.writes == [b"DEEP_SLEEP 60000\n"]
+
+    stopped = client.delete("/api/mesh/auto-sleep")
+    assert stopped.status_code == 200
+    assert stopped.json()["active"] is False
+    assert stopped.json()["status"] == "stopped"
+    assert serial.writes == [b"DEEP_SLEEP 60000\n"]
+
+
+def test_auto_sleep_mode_validates_settings_and_gateway(monkeypatch):
+    client = TestClient(app)
+    monkeypatch.setattr(receiver, "transport", None)
+    monkeypatch.setattr(receiver, "connected", False)
+
+    assert client.post(
+        "/api/mesh/auto-sleep",
+        json={"sleepMs": 0, "wakeGraceMs": 5000},
+    ).status_code == 422
+    assert client.post(
+        "/api/mesh/auto-sleep",
+        json={"sleepMs": 60000, "wakeGraceMs": -1},
+    ).status_code == 422
+    assert client.post(
+        "/api/mesh/auto-sleep",
+        json={"sleepMs": 60000, "wakeGraceMs": 5000},
+    ).status_code == 503
+
+
+def test_auto_sleep_mode_repeats_after_sleep_and_wake_wait(monkeypatch):
+    class FakeSerial:
+        def __init__(self):
+            self.writes = []
+
+        def write(self, payload):
+            self.writes.append(payload)
+            return len(payload)
+
+        def flush(self):
+            pass
+
+    serial = FakeSerial()
+    monkeypatch.setattr(receiver, "transport", serial)
+    monkeypatch.setattr(receiver, "connected", True)
+    monkeypatch.setenv("MESH_TRANSPORT", "disabled")
+
+    with TestClient(app) as client:
+        started = client.post(
+            "/api/mesh/auto-sleep",
+            json={"sleepMs": 20, "wakeGraceMs": 20},
+        )
+        assert started.status_code == 200
+        time.sleep(0.15)
+        stopped = client.delete("/api/mesh/auto-sleep")
+
+        assert stopped.status_code == 200
+        assert len(serial.writes) >= 2
+        assert all(payload == b"DEEP_SLEEP 20\n" for payload in serial.writes)

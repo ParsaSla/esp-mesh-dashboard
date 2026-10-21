@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ESP32 Mesh Telemetry — Observer</title>
-    <link rel="stylesheet" href="/static/styles.css?v=3.0" />
+    <link rel="stylesheet" href="/static/styles.css?v=3.3" />
   </head>
   <body>
     <div class="app-shell">
@@ -43,6 +43,64 @@
         <div id="banner" class="banner" hidden>
           <span id="banner-text"></span>
         </div>
+
+        <nav class="view-tabs" aria-label="Dashboard views">
+          <button type="button" id="overview-tab" class="view-tab" aria-pressed="true">OVERVIEW</button>
+          <button type="button" id="compare-tab" class="view-tab" aria-pressed="false">COMPARE NODES</button>
+        </nav>
+
+        <div id="overview-view">
+        <section class="mesh-controls" aria-labelledby="mesh-controls-title">
+          <div class="panel-header">
+            <div class="panel-title-wrap">
+              <h3 id="mesh-controls-title">MESH CONTROLS</h3>
+              <span class="panel-subtitle">BROADCAST TO ALL MESH NODES VIA THE OBSERVER</span>
+            </div>
+            <span id="mesh-command-status" class="mono-dim" role="status" aria-live="polite">gateway unavailable</span>
+          </div>
+          <div class="mesh-control-actions">
+            <button type="button" id="request-data-btn" class="mesh-action-btn" disabled>REQUEST DATA NOW</button>
+            <form id="interval-form" class="interval-form">
+              <label for="interval-seconds">REPORT INTERVAL <span>(SECONDS)</span></label>
+              <input type="number" id="interval-seconds" min="0.001" max="4294967.295" step="0.001" value="3" required />
+              <button type="submit" id="interval-apply-btn" class="mesh-action-btn" disabled>APPLY INTERVAL</button>
+            </form>
+            <form id="deep-sleep-form" class="interval-form">
+              <label for="deep-sleep-seconds">DEEP SLEEP DURATION <span>(SECONDS)</span></label>
+              <input type="number" id="deep-sleep-seconds" min="0.001" max="4294967.295" step="0.001" value="10" required />
+              <button type="submit" id="deep-sleep-btn" class="mesh-action-btn" disabled>START DEEP SLEEP</button>
+            </form>
+            <div class="auto-sleep-control">
+              <div class="auto-sleep-header">
+                <div>
+                  <h4>AUTO SLEEP CYCLE</h4>
+                  <span class="panel-subtitle">SLEEP · WAKE · REPORT · REPEAT</span>
+                </div>
+                <span id="auto-sleep-status" class="auto-sleep-status" data-phase="stopped" role="status" aria-live="polite">
+                  <span class="auto-sleep-indicator" aria-hidden="true"></span>
+                  <span id="auto-sleep-status-text">checking auto mode…</span>
+                </span>
+              </div>
+              <form id="auto-sleep-form" class="auto-sleep-settings">
+                <label class="auto-sleep-field" for="auto-sleep-seconds">
+                  <span>SLEEP FOR</span>
+                  <span class="auto-sleep-input-wrap">
+                    <input type="number" id="auto-sleep-seconds" min="0.001" max="4294967.295" step="0.001" value="60" required />
+                    <span>SECONDS</span>
+                  </span>
+                </label>
+                <label class="auto-sleep-field" for="auto-wake-grace-seconds">
+                  <span>WAKE-UP WAIT</span>
+                  <span class="auto-sleep-input-wrap">
+                    <input type="number" id="auto-wake-grace-seconds" min="0" max="4294967.295" step="0.001" value="5" required />
+                    <span>SECONDS</span>
+                  </span>
+                </label>
+                <button type="submit" id="auto-sleep-toggle-btn" class="mesh-action-btn auto-sleep-toggle" disabled>START AUTO MODE</button>
+              </form>
+            </div>
+          </div>
+        </section>
 
         <section id="metric-grid" class="metric-strip" aria-live="polite">
           <p class="empty-note" id="metrics-empty">no telemetry yet — waiting for the first station report</p>
@@ -91,6 +149,26 @@
             <li class="log-empty" id="log-empty">no events yet</li>
           </ul>
         </section>
+        </div>
+
+        <section id="compare-view" class="compare-view" aria-labelledby="compare-title" hidden>
+          <div class="panel-header compare-header">
+            <div class="panel-title-wrap">
+              <h3 id="compare-title">COMPARE NODE MEASUREMENTS</h3>
+              <span class="panel-subtitle">SELECT A MEASUREMENT TO OVERLAY ITS HISTORY FOR EACH NODE</span>
+            </div>
+            <label class="compare-measurement-label" for="compare-measurement">MEASUREMENT
+              <select id="compare-measurement" class="compare-measurement" aria-label="Measurement to compare">
+                <option value="">WAITING FOR MEASUREMENTS</option>
+              </select>
+            </label>
+          </div>
+          <div class="chart-frame compare-chart-frame" id="compare-chart-frame">
+            <canvas id="compare-chart" aria-label="Measurement comparison chart across mesh nodes" role="img"></canvas>
+            <div id="compare-empty" class="empty-note chart-empty">waiting for measurement history</div>
+          </div>
+          <div id="compare-legend" class="compare-legend" aria-live="polite"></div>
+        </section>
       </main>
 
       <!-- Right sidebar: AI Chatbot -->
@@ -133,6 +211,6 @@
       </aside>
     </div>
 
-    <script src="/static/app.js?v=3.0"></script>
+    <script src="/static/app.js?v=3.3"></script>
   </body>
 </html>

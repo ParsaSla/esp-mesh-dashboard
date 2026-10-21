@@ -55,6 +55,7 @@ def test_ask_mesh_ai_unconfigured(monkeypatch):
 
 
 def test_ask_mesh_ai_mocked_success(monkeypatch):
+    monkeypatch.setenv("AI_PROVIDER", "deepseek")
     monkeypatch.setenv("AI_API_KEY", "test_mock_key")
     monkeypatch.setenv("AI_BASE_URL", "https://api.deepseek.com")
     monkeypatch.setenv("AI_MODEL", "deepseek-chat")
@@ -94,7 +95,52 @@ def test_ask_mesh_ai_mocked_success(monkeypatch):
     assert res["model"] == "deepseek-chat"
 
 
+def test_ask_mesh_ai_opencode_deepseek_flash_chat_completions(monkeypatch):
+    monkeypatch.setenv("AI_PROVIDER", "opencode")
+    monkeypatch.setenv("AI_API_KEY", "test_opencode_key")
+    monkeypatch.delenv("AI_BASE_URL", raising=False)
+    monkeypatch.delenv("AI_MODEL", raising=False)
+
+    def mock_handler(request: httpx.Request):
+        assert str(request.url) == "https://opencode.ai/inference/openai/v1/chat/completions"
+        body = json.loads(request.content.decode("utf-8"))
+        assert body["model"] == "deepseek-v4.1-flash-free"
+        assert body["max_tokens"] == 800
+        assert any(item["role"] == "system" for item in body["messages"])
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "OpenCode DeepSeek Flash is working.",
+                        }
+                    }
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(mock_handler)
+
+    async def _run():
+        async with httpx.AsyncClient(transport=transport) as mock_client:
+            return await ask_mesh_ai(
+                message="Check status",
+                receiver=receiver,
+                client=mock_client,
+            )
+
+    result = asyncio.run(_run())
+    assert result["configured"] is True
+    assert result["reply"] == "OpenCode DeepSeek Flash is working."
+    assert result["model"] == "deepseek-v4.1-flash-free"
+
+
 def test_api_chat_and_status_endpoints(monkeypatch):
+    monkeypatch.setenv("AI_PROVIDER", "deepseek")
+    monkeypatch.setenv("AI_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setenv("AI_MODEL", "deepseek-chat")
     client = TestClient(app)
 
     # Status check
