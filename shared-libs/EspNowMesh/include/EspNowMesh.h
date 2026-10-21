@@ -89,7 +89,6 @@ private:
   volatile bool mLastSendSucceeded;
   SeenPacket mSeenPackets[kDuplicateCacheSize];
   size_t mNextSeenPacket;
-  uint32_t mNextSequence;
   uint8_t mMacAddress[6];
   bool mInitialized;
 };

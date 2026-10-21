@@ -4,6 +4,7 @@
 #include <WiFi.h>
 
 #include <cstring>
+#include <esp_attr.h>
 #include <esp_wifi.h>
 
 namespace
@@ -30,6 +31,7 @@ namespace
 } // namespace
 
 EspNowMesh *EspNowMesh::mActiveInstance = nullptr;
+RTC_DATA_ATTR static uint32_t gNextSequence = 0;
 
 // Start with empty queues and packet-tracking state.
 EspNowMesh::EspNowMesh()
@@ -40,7 +42,6 @@ EspNowMesh::EspNowMesh()
       mLastSendSucceeded(false),
       mSeenPackets{},
       mNextSeenPacket(0),
-      mNextSequence(0),
       mMacAddress{},
       mInitialized(false) {}
 
@@ -245,7 +246,7 @@ bool EspNowMesh::publishTo(const uint8_t destination[6],
   // Fill in the routing metadata before copying the application payload.
   std::memcpy(message.origin, mMacAddress, sizeof(mMacAddress));
   std::memcpy(message.destination, destination, sizeof(message.destination));
-  message.sequence = ++mNextSequence;
+  message.sequence = ++gNextSequence;
   message.ttl = kInitialTtl;
   message.payloadLength = length;
   if (length > 0)
