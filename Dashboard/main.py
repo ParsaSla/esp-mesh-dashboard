@@ -325,7 +325,7 @@ async def health():
 
 
 class MeshCommandRequest(BaseModel):
-    command: Literal["SEND_DATA", "CHANGE_INTERVAL", "DEEP_SLEEP"]
+    command: Literal["SEND_DATA", "CHANGE_INTERVAL", "DEEP_SLEEP", "MEASURE_RSSI"]
     intervalMs: Optional[int] = Field(default=None, ge=1, le=4294967295)
     sleepMs: Optional[int] = Field(default=None, ge=1, le=4294967295)
 
@@ -358,6 +358,10 @@ async def stop_auto_sleep():
 
 @app.post("/api/mesh/commands")
 async def send_mesh_command(request: MeshCommandRequest):
+    if request.command == "MEASURE_RSSI" and (
+        request.intervalMs is not None or request.sleepMs is not None
+    ):
+        raise HTTPException(status_code=400, detail="MEASURE_RSSI does not accept a duration")
     if request.command == "SEND_DATA" and (request.intervalMs is not None or request.sleepMs is not None):
         raise HTTPException(status_code=400, detail="SEND_DATA does not accept a duration")
     if request.command == "CHANGE_INTERVAL" and request.intervalMs is None:
@@ -375,12 +379,20 @@ async def send_mesh_command(request: MeshCommandRequest):
     elif request.command == "DEEP_SLEEP":
         command = f"DEEP_SLEEP {request.sleepMs}"
 
+    measurement_id = None
+    if request.command == "MEASURE_RSSI":
+        measurement_id = receiver.begin_rssi_measurement()
     try:
         receiver.write_command(command)
     except (ConnectionError, OSError) as exc:
+        if measurement_id is not None:
+            receiver.cancel_rssi_measurement(measurement_id)
         logger.warning("Unable to send mesh command %s: %s", request.command, exc)
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return {"sent": True, "command": command}
+    response = {"sent": True, "command": command}
+    if measurement_id is not None:
+        response["measurementId"] = measurement_id
+    return response
 
 
 @app.get("/nodes")

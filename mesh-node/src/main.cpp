@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include "EspNowMesh.h"
 #include "SensorManager.h"
-#include "LdrSensor.h"
+#include "AdcSensor.h"
 #include "EnvironmentalSensor.h"
 
 #include <climits>
@@ -20,12 +20,16 @@ void processMessage(const MeshMessage &message, const MeshReceiveInfo &receiveIn
 
 EspNowMesh mesh;
 SensorManager sensorManager;
-LdrSensor ldrSensor("ldr1", 35);
+AdcSensor ldrSensor("ldr1", 35, 'L');
+AdcSensor soilMoistureSensor("soil1", 32, 'S');
+// AdcSensor uvSensor("uv1", 33, 'U');
+AdcSensor microphoneSensor("mic1", 33, 'M');
 EnvironmentalSensor environmentalSensor("env1");
 
 const char kSendDataCommand[] = "SEND_DATA";
 const char kChangeIntervalCommand[] = "CHANGE_INTERVAL";
 const char kDeepSleepCommand[] = "DEEP_SLEEP";
+const char kMeasureRssiCommand[] = "MEASURE_RSSI";
 
 unsigned long lastUpdate = 0;
 unsigned long updateInterval = 3000;
@@ -38,6 +42,18 @@ void setup()
   if (!sensorManager.add(ldrSensor))
   {
     Serial.println("Failed to add LDR sensor");
+  }
+  if (!sensorManager.add(soilMoistureSensor))
+  {
+    Serial.println("Failed to add soil moisture sensor");
+  }
+  // if (!sensorManager.add(uvSensor))
+  // {
+  //   Serial.println("Failed to add UV sensor");
+  // }
+  if (!sensorManager.add(microphoneSensor))
+  {
+    Serial.println("Failed to add microphone sensor");
   }
   if (!sensorManager.add(environmentalSensor))
   {
@@ -105,6 +121,22 @@ void processMessage(const MeshMessage &message,
                     const MeshReceiveInfo &receiveInfo, void *context)
 {
   (void)context;
+
+  if (message.payloadLength == sizeof(kMeasureRssiCommand) - 1 &&
+      std::memcmp(message.payload, kMeasureRssiCommand,
+                  message.payloadLength) == 0)
+  {
+    if (!mesh.publishRssiProbe())
+    {
+      Serial.println("Failed to queue RSSI probe");
+    }
+    return;
+  }
+
+  if (mesh.isRssiProbe(message))
+  {
+    return;
+  }
 
   if (message.payloadLength == strlen(kSendDataCommand) &&
       std::memcmp(message.payload, kSendDataCommand, message.payloadLength) == 0)

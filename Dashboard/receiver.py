@@ -1,10 +1,26 @@
+import json
 import os
 import socket
 import threading
+import time
 from collections.abc import MutableSet
 
 from history import HistoryBuffer
 from mesh_protocol import normalize_message
+
+
+RSSI_MEASUREMENT_QUIET_SECONDS = 2
+RSSI_MEASUREMENT_MAX_SECONDS = 15
+
+
+def _payload_for_duplicate_check(message):
+    packet_payload = message.get("packetPayload")
+    if isinstance(packet_payload, str):
+        try:
+            return json.loads(packet_payload)
+        except json.JSONDecodeError:
+            return packet_payload
+    return message.get("payload")
 
 
 class MeshReceiver:
@@ -16,6 +32,56 @@ class MeshReceiver:
         self.transport = None
         self.transport_write_lock = threading.Lock()
         self.websocket_clients = set()
+        self.rssi_measurement_sequence = 0
+        self.active_rssi_measurement = None
+
+    def begin_rssi_measurement(self):
+        self.rssi_measurement_sequence += 1
+        measurement_id = self.rssi_measurement_sequence
+        self.active_rssi_measurement = {
+            "id": measurement_id,
+            "started_at": time.monotonic(),
+            "last_probe_at": None,
+            "routes": {},
+        }
+        return measurement_id
+
+    def cancel_rssi_measurement(self, measurement_id):
+        if (
+            self.active_rssi_measurement is not None
+            and self.active_rssi_measurement["id"] == measurement_id
+        ):
+            self.active_rssi_measurement = None
+
+    def _handle_rssi_route(self, message):
+        now = time.monotonic()
+        measurement = self.active_rssi_measurement
+        if measurement is not None:
+            quiet_expired = (
+                measurement["last_probe_at"] is not None
+                and now - measurement["last_probe_at"] >= RSSI_MEASUREMENT_QUIET_SECONDS
+            )
+            maximum_expired = (
+                now - measurement["started_at"] >= RSSI_MEASUREMENT_MAX_SECONDS
+            )
+            if quiet_expired or maximum_expired:
+                self.active_rssi_measurement = None
+                measurement = None
+
+        measurement_id = None
+        if measurement is not None:
+            measurement["last_probe_at"] = now
+            measurement["routes"][message["nodeId"]] = message["route"]
+            measurement_id = measurement["id"]
+
+        return {
+            "type": "rssi_route",
+            "measurementId": measurement_id,
+            "origin": message["nodeId"],
+            "timestamp": message["timestamp"],
+            "sequence": message["sequence"],
+            "route": message["route"],
+        }
 
     def write_command(self, command):
         with self.transport_write_lock:
@@ -102,19 +168,21 @@ class MeshReceiver:
 
     def handle_message(self, raw_message):
         message = normalize_message(raw_message)
+        if message.get("type") == "rssi_route":
+            return self._handle_rssi_route(message)
+
         node_id = message["nodeId"]
         sequence = message["sequence"]
         boot_id = message.get("bootId")
 
         current = self.nodes.get(node_id)
         if current and current.get("sequence") is not None:
-            cur_boot_id = current.get("bootId")
-            if boot_id is not None:
-                if cur_boot_id == boot_id and sequence <= current["sequence"]:
-                    raise ValueError(f"Duplicate or out-of-order sequence for {node_id} (boot {boot_id}): {sequence}")
-            else:
-                if sequence <= current["sequence"]:
-                    raise ValueError(f"Duplicate or out-of-order sequence for {node_id}: {sequence}")
+            if (
+                sequence == current["sequence"]
+                and _payload_for_duplicate_check(message)
+                == _payload_for_duplicate_check(current)
+            ):
+                raise ValueError(f"Duplicate sequence and payload for {node_id}: {sequence}")
 
         state = {
             "nodeId": node_id,

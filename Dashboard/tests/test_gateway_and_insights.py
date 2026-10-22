@@ -39,6 +39,39 @@ def test_gateway_frame_conversion_and_normalization():
     assert normalized["payload"]["ldr1.raw"] == 1234.0
 
 
+def test_gateway_soil_moisture_is_scaled_to_percentage():
+    frame = {
+        **SAMPLE_GATEWAY_FRAME,
+        "readings": [
+            {"sensorId": "soil1", "channel": "S", "value": 2048, "unit": "adc_counts"}
+        ],
+    }
+
+    envelope = convert_gateway_frame(frame)
+
+    assert envelope["payload"] == {"soil1.S": 50.0}
+    assert envelope["units"] == {"soil1.S": "%"}
+
+
+def test_gateway_uv_adc_reading_is_converted_to_uv_index():
+    frame = {
+        **SAMPLE_GATEWAY_FRAME,
+        "readings": [
+            {
+                "sensorId": "uv1",
+                "channel": "U",
+                "value": round(227 * 4095 / 3300),
+                "unit": "adc_counts",
+            }
+        ],
+    }
+
+    envelope = convert_gateway_frame(frame)
+
+    assert envelope["payload"]["uv1.U"] == pytest.approx(1.0, abs=0.02)
+    assert envelope["units"] == {"uv1.U": "UVI"}
+
+
 def test_gateway_frame_rssi_unavailable_when_minus_128():
     frame = {
         **SAMPLE_GATEWAY_FRAME,
@@ -83,19 +116,31 @@ def test_gateway_frame_skips_non_finite_and_rejects_empty():
     assert converted["payload"] == {"ldr2.raw": 456.0}
 
 
-def test_same_boot_duplicate_and_out_of_order_rejection():
+def test_same_boot_duplicate_rejection_and_lower_sequence_acceptance():
     rx = MeshReceiver()
     rx.handle_message(SAMPLE_GATEWAY_FRAME)
 
-    # Same bootId, duplicate sequence
+    # Same bootId, sequence, and payload is still a duplicate.
     dup = {**SAMPLE_GATEWAY_FRAME, "sequence": 42}
-    with pytest.raises(ValueError, match="Duplicate or out-of-order sequence"):
+    with pytest.raises(ValueError, match="Duplicate sequence and payload"):
         rx.handle_message(dup)
 
-    # Same bootId, lower sequence
+    # Same origin and sequence with a changed payload is a distinct report.
+    changed_payload = {
+        **SAMPLE_GATEWAY_FRAME,
+        "readings": [
+            {"sensorId": "ldr1", "channel": "raw", "value": 1235, "unit": "adc_counts"}
+        ],
+    }
+    event = rx.handle_message(changed_payload)
+    assert event["sequence"] == SAMPLE_GATEWAY_FRAME["sequence"]
+    assert event["payload"] == {"ldr1.raw": 1235.0}
+
+    # A node may have restarted and reset its sequence counter.
     lower = {**SAMPLE_GATEWAY_FRAME, "sequence": 41}
-    with pytest.raises(ValueError, match="Duplicate or out-of-order sequence"):
-        rx.handle_message(lower)
+    lower_event = rx.handle_message(lower)
+    assert lower_event["sequence"] == 41
+    assert rx.get_node(SAMPLE_GATEWAY_FRAME["origin"])["sequence"] == 41
 
 
 def test_new_boot_sequence_reset_allowed():

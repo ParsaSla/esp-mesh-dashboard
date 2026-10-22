@@ -6,6 +6,22 @@ from datetime import datetime, timezone
 
 REQUIRED_FIELDS = {"nodeId", "timestamp", "sequence", "payload"}
 BOOT_ID_RE = re.compile(r"^[0-9a-f]{16}$")
+ADC_MAX_COUNT = 4095.0
+ADC_REFERENCE_MV = 3300.0
+UV_CALIBRATION_MV = (
+    (50.0, 0.0),
+    (227.0, 1.0),
+    (318.0, 2.0),
+    (408.0, 3.0),
+    (503.0, 4.0),
+    (606.0, 5.0),
+    (696.0, 6.0),
+    (795.0, 7.0),
+    (881.0, 8.0),
+    (976.0, 9.0),
+    (1079.0, 10.0),
+    (1170.0, 11.0),
+)
 
 
 def _parse_message(raw_message):
@@ -52,6 +68,34 @@ def _coerce_float(value, field_name):
         raise ValueError(f"{field_name} must be finite.")
 
     return numeric
+
+
+def _normalize_reading(key, value):
+    numeric = _coerce_float(value, key)
+    code = re.split(r"[._\s-]", str(key))[-1].upper()
+    if code == "S":
+        return (4096.0 - min(max(numeric, 0.0), 4096.0)) * (100.0 / 4096.0)
+    if code == "U":
+        millivolts = min(max(numeric, 0.0), ADC_MAX_COUNT) * ADC_REFERENCE_MV / ADC_MAX_COUNT
+        if millivolts < UV_CALIBRATION_MV[0][0]:
+            return 0.0
+        for (lower_mv, lower_index), (upper_mv, upper_index) in zip(
+            UV_CALIBRATION_MV, UV_CALIBRATION_MV[1:]
+        ):
+            if millivolts <= upper_mv:
+                fraction = (millivolts - lower_mv) / (upper_mv - lower_mv)
+                return lower_index + fraction * (upper_index - lower_index)
+        return UV_CALIBRATION_MV[-1][1]
+    return numeric
+
+
+def _reading_unit(key):
+    code = re.split(r"[._\s-]", str(key))[-1].upper()
+    if code == "S":
+        return "%"
+    if code == "U":
+        return "UVI"
+    return None
 
 
 def _validate_timestamp(timestamp_value):
@@ -111,6 +155,30 @@ def _validate_mesh_address(value, field_name):
     return value.upper()
 
 
+def _decode_rssi_probe_payload(payload_text):
+    if not payload_text.startswith("RSSI"):
+        return None
+
+    try:
+        payload = payload_text.encode("latin-1")
+    except UnicodeEncodeError as exc:
+        raise ValueError("RSSI probe payload contains a non-byte character.") from exc
+
+    marker_size = 4
+    hop_size = 7
+    if len(payload) < marker_size + hop_size or (len(payload) - marker_size) % hop_size:
+        raise ValueError("RSSI probe payload contains incomplete hop records.")
+
+    route = []
+    for offset in range(marker_size, len(payload), hop_size):
+        mac = ":".join(f"{byte:02X}" for byte in payload[offset : offset + 6])
+        rssi = payload[offset + 6]
+        if rssi >= 128:
+            rssi -= 256
+        route.append({"nodeId": mac, "rssi": None if rssi == -128 else rssi})
+    return route
+
+
 def convert_mesh_message(raw_message):
     message = _parse_message(raw_message)
     required_fields = {"sender", "origin", "destination", "sequence", "ttl", "hops", "payload"}
@@ -129,6 +197,23 @@ def convert_mesh_message(raw_message):
     if not isinstance(payload_text, str):
         raise ValueError("payload must be a string.")
 
+    route = _decode_rssi_probe_payload(payload_text)
+    if route is not None:
+        _validate_mesh_address(message["sender"], "sender")
+        origin = _validate_mesh_address(message["origin"], "origin")
+        _validate_mesh_address(message["destination"], "destination")
+        _validate_hops(message["ttl"])
+        _validate_hops(message["hops"])
+        if route[0]["nodeId"] != origin:
+            raise ValueError("RSSI probe origin does not match its first hop.")
+        return {
+            "type": "rssi_route",
+            "nodeId": origin,
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "sequence": sequence,
+            "route": route,
+        }
+
     payload = {}
     try:
         decoded_payload = json.loads(payload_text)
@@ -137,7 +222,7 @@ def convert_mesh_message(raw_message):
     if isinstance(decoded_payload, dict):
         for key, value in decoded_payload.items():
             try:
-                payload[str(key)] = _coerce_float(value, str(key))
+                payload[str(key)] = _normalize_reading(key, value)
             except ValueError:
                 continue
 
@@ -154,6 +239,10 @@ def convert_mesh_message(raw_message):
         "rssiSourceNodeId": _validate_mesh_address(message["sender"], "sender"),
         "rssi": _validate_rssi(message.get("rssi")),
     }
+    units = {key: _reading_unit(key) for key in payload}
+    units = {key: unit for key, unit in units.items() if unit is not None}
+    if units:
+        envelope["units"] = units
     return envelope
 
 
@@ -201,13 +290,16 @@ def convert_gateway_frame(raw_frame):
         if val is None or isinstance(val, bool):
             continue
         try:
-            numeric_val = float(val)
+            numeric_val = _normalize_reading(key, val)
             if not math.isfinite(numeric_val):
                 continue
             payload[key] = numeric_val
             unit_val = item.get("unit")
             if unit_val is not None:
                 units[key] = str(unit_val)
+            unit = _reading_unit(key)
+            if unit is not None:
+                units[key] = unit
         except (ValueError, TypeError):
             continue
 
@@ -288,7 +380,7 @@ def normalize_message(raw_message):
 
     normalized_payload = {}
     for key, value in message["payload"].items():
-        normalized_payload[str(key)] = _coerce_float(value, key)
+        normalized_payload[str(key)] = _normalize_reading(key, value)
 
     normalized["payload"] = normalized_payload
 
@@ -311,6 +403,13 @@ def normalize_message(raw_message):
 
     if "units" in message and message["units"] is not None:
         normalized["units"] = _validate_units(message["units"])
+    reading_units = {
+        key: unit
+        for key in normalized_payload
+        if (unit := _reading_unit(key)) is not None
+    }
+    if reading_units:
+        normalized.setdefault("units", {}).update(reading_units)
 
     for extra_key in ("meshId", "batteryLevel", "firmwareVersion", "role"):
         if extra_key in message and extra_key not in normalized:

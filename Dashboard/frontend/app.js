@@ -14,6 +14,9 @@ const els = {
   banner: document.getElementById("banner"),
   bannerText: document.getElementById("banner-text"),
   requestDataBtn: document.getElementById("request-data-btn"),
+  measureRssiBtn: document.getElementById("measure-rssi-btn"),
+  rssiMeasurementStatus: document.getElementById("rssi-measurement-status"),
+  rssiRouteResults: document.getElementById("rssi-route-results"),
   intervalForm: document.getElementById("interval-form"),
   intervalSeconds: document.getElementById("interval-seconds"),
   intervalApplyBtn: document.getElementById("interval-apply-btn"),
@@ -31,15 +34,13 @@ const els = {
   railCount: document.getElementById("rail-count"),
   railEmpty: document.getElementById("rail-empty"),
   stationList: document.getElementById("station-list"),
-  insightsBlock: document.getElementById("insights-block"),
-  insightsNode: document.getElementById("insights-node"),
-  insightsUpdatedAt: document.getElementById("insights-updated-at"),
-  insightsContent: document.getElementById("insights-content"),
   chartCanvas: document.getElementById("telemetry-chart"),
   chartFrame: document.getElementById("chart-frame"),
   chartEmpty: document.getElementById("chart-empty"),
   chartNode: document.getElementById("chart-node"),
   chartSeq: document.getElementById("chart-seq"),
+  chartSeriesLeft: document.getElementById("chart-series-left"),
+  chartSeriesRight: document.getElementById("chart-series-right"),
   chartLegend: document.getElementById("chart-legend"),
   overviewTab: document.getElementById("overview-tab"),
   compareTab: document.getElementById("compare-tab"),
@@ -59,6 +60,9 @@ const els = {
   chatBlock: document.getElementById("chat-block"),
   aiModelTag: document.getElementById("ai-model-tag"),
   chatClearBtn: document.getElementById("chat-clear-btn"),
+  chatExpandBtn: document.getElementById("chat-expand-btn"),
+  chatCloseBtn: document.getElementById("chat-close-btn"),
+  chatOpenBtn: document.getElementById("chat-open-btn"),
   chatMessages: document.getElementById("chat-messages"),
   chatForm: document.getElementById("chat-form"),
   chatInput: document.getElementById("chat-input"),
@@ -77,6 +81,7 @@ const METRICS = [
 
 const state = {
   selected: null,
+  chartSelections: new Map(),
   activeView: "overview",
   compareMetric: null,
   nodes: new Map(),
@@ -93,7 +98,12 @@ const state = {
   autoSleepStatusError: null,
   autoSleepRequestBusy: false,
   autoSleepStatusRequestBusy: false,
+  rssiMeasurements: new Map(),
+  activeRssiMeasurementId: null,
 };
+
+const RSSI_MEASUREMENT_QUIET_MS = 2000;
+const RSSI_MEASUREMENT_MAX_MS = 15000;
 
 /* ---------- helpers ---------- */
 
@@ -190,6 +200,7 @@ function updateMeshControls() {
     !state.meshCommandBusy && !state.autoSleepRequestBusy &&
     !(state.autoSleep && state.autoSleep.active);
   if (els.requestDataBtn) els.requestDataBtn.disabled = !enabled;
+  if (els.measureRssiBtn) els.measureRssiBtn.disabled = !enabled;
   if (els.intervalApplyBtn) els.intervalApplyBtn.disabled = !enabled;
   if (els.deepSleepBtn) els.deepSleepBtn.disabled = !enabled;
   if (
@@ -335,11 +346,19 @@ async function sendMeshCommand(command, milliseconds) {
     });
     const result = await res.json();
     if (!res.ok) throw new Error(result.detail || `HTTP ${res.status}`);
-    const status = command === "SEND_DATA"
-      ? "SEND_DATA sent to observer; awaiting node telemetry."
-      : command === "CHANGE_INTERVAL"
-        ? `Report interval ${milliseconds / 1000} sec sent to observer.`
-        : `DEEP_SLEEP ${milliseconds / 1000} sec sent to observer.`;
+    if (command === "MEASURE_RSSI") {
+      activateRssiMeasurement(result.measurementId);
+    }
+    let status;
+    if (command === "SEND_DATA") {
+      status = "SEND_DATA sent to observer; awaiting node telemetry.";
+    } else if (command === "MEASURE_RSSI") {
+      status = "MEASURE_RSSI sent to observer; collecting origin routes.";
+    } else if (command === "CHANGE_INTERVAL") {
+      status = `Report interval ${milliseconds / 1000} sec sent to observer.`;
+    } else {
+      status = `DEEP_SLEEP ${milliseconds / 1000} sec sent to observer.`;
+    }
     els.meshCommandStatus.textContent = status;
     pushLog("info", "mesh", status);
   } catch (error) {
@@ -355,6 +374,9 @@ async function sendMeshCommand(command, milliseconds) {
 function initMeshControls() {
   if (els.requestDataBtn) {
     els.requestDataBtn.addEventListener("click", () => sendMeshCommand("SEND_DATA"));
+  }
+  if (els.measureRssiBtn) {
+    els.measureRssiBtn.addEventListener("click", () => sendMeshCommand("MEASURE_RSSI"));
   }
   if (els.intervalForm) {
     els.intervalForm.addEventListener("submit", (event) => {
@@ -468,6 +490,9 @@ function formatMetricLabel(key) {
   if (code === "T") return "Temperature";
   if (code === "H") return "Humidity";
   if (code === "P") return "Pressure";
+  if (code === "S") return "Soil moisture";
+  if (code === "U") return "UV Index";
+  if (code === "M") return "Microphone";
 
   const lower = key.toLowerCase();
   if (lower.includes("temp")) return "Temperature";
@@ -481,6 +506,9 @@ function metricDefaultUnit(key) {
   if (code === "T") return "°C";
   if (code === "H") return "%";
   if (code === "P") return "Pa";
+  if (code === "S") return "%";
+  if (code === "U") return "UVI";
+  if (code === "M") return "adc";
 
   const lower = key.toLowerCase();
   if (lower.includes("temp")) return "°C";
@@ -491,7 +519,7 @@ function metricDefaultUnit(key) {
 
 function metricDecimals(key) {
   const code = metricCode(key);
-  return code === "H" || key.toLowerCase().includes("hum") || key.toLowerCase().includes("ldr") ? 0 : 1;
+  return ["H", "S", "M"].includes(code) || key.toLowerCase().includes("hum") || key.toLowerCase().includes("ldr") ? 0 : 1;
 }
 
 function metricCards(values, node) {
@@ -503,7 +531,7 @@ function metricCards(values, node) {
     if (!Number.isFinite(Number(v)) || cards.length >= 4) continue;
     const label = formatMetricLabel(k);
     const code = metricCode(k);
-    const unit = ["L", "T", "H", "P"].includes(code) ? metricDefaultUnit(k) : (units[k] || metricDefaultUnit(k));
+    const unit = ["L", "T", "H", "P", "S", "U", "M"].includes(code) ? metricDefaultUnit(k) : (units[k] || metricDefaultUnit(k));
     const decimals = metricDecimals(k);
     cards.push({ label, unit, decimals, value: Number(v), key: k });
   }
@@ -713,7 +741,7 @@ function medianInterval(samples) {
   return ds[Math.floor(ds.length / 2)] || 3000;
 }
 
-function chartKeys(samples) {
+function availableChartKeys(samples) {
   const metaUnits = (state.nodes.get(state.selected) || {}).units || {};
   const found = new Set();
   for (const s of samples) {
@@ -731,16 +759,19 @@ function chartKeys(samples) {
       if (code === "H" || key.toLowerCase().includes("hum")) return 1;
       if (code === "P") return 2;
       if (code === "L" || key.toLowerCase().includes("ldr")) return 3;
-      return 4;
+      if (code === "S") return 4;
+      if (code === "U") return 5;
+      if (code === "M") return 6;
+      return 7;
     };
     const priorityDiff = priority(a) - priority(b);
     if (priorityDiff) return priorityDiff;
     return a.localeCompare(b);
   });
 
-  return sorted.slice(0, 2).map((k, idx) => {
+  return sorted.map((k) => {
     const code = metricCode(k);
-    const defaultUnit = ["L", "T", "H", "P"].includes(code)
+    const defaultUnit = ["L", "T", "H", "P", "S", "U", "M"].includes(code)
       ? metricDefaultUnit(k)
       : metaUnits[k] || metricDefaultUnit(k);
 
@@ -750,9 +781,66 @@ function chartKeys(samples) {
       rawKey: k,
       unit: defaultUnit,
       decimals: metricDecimals(k),
-      axis: idx === 1 ? "right" : "left",
     };
   });
+}
+
+function chartSelection(samples) {
+  const available = availableChartKeys(samples);
+  const saved = state.selected ? state.chartSelections.get(state.selected) : null;
+  return saved || [available[0]?.key || "", available[1]?.key || ""];
+}
+
+function chartKeys(samples) {
+  const available = availableChartKeys(samples);
+  const selected = chartSelection(samples);
+  return selected
+    .filter((key, index) => key && selected.indexOf(key) === index)
+    .map((key) => available.find((metric) => metric.key === key))
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((metric, index) => ({ ...metric, axis: index === 1 ? "right" : "left" }));
+}
+
+function renderChartMetricControls(samples) {
+  const available = availableChartKeys(samples);
+  const selected = chartSelection(samples);
+  const options = [
+    { value: "", label: "HIDDEN" },
+    ...available.map((metric) => ({
+      value: metric.key,
+      label: `${metric.label}${metric.unit ? ` (${metric.unit})` : ""}`,
+    })),
+  ];
+
+  for (const [index, select] of [els.chartSeriesLeft, els.chartSeriesRight].entries()) {
+    if (!select) continue;
+    select.replaceChildren(...options.map(({ value, label }) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      return option;
+    }));
+    select.value = selected[index] || "";
+    select.disabled = !available.length;
+  }
+}
+
+function initChartControls() {
+  const onChange = (changed, other) => {
+    const selected = [els.chartSeriesLeft.value, els.chartSeriesRight.value];
+    if (changed.value && changed.value === other.value) {
+      other.value = "";
+      selected[other === els.chartSeriesLeft ? 0 : 1] = "";
+    }
+    if (state.selected) state.chartSelections.set(state.selected, selected);
+    const samples = state.samples.get(state.selected) || [];
+    scheduleChartDraw();
+    renderChartTable(samples);
+  };
+
+  els.chartSeriesLeft.addEventListener("change", () => onChange(els.chartSeriesLeft, els.chartSeriesRight));
+  els.chartSeriesRight.addEventListener("change", () => onChange(els.chartSeriesRight, els.chartSeriesLeft));
 }
 
 const GAP_FACTOR = 3;
@@ -771,6 +859,7 @@ function drawChart() {
 
   const samples = state.samples.get(state.selected) || [];
   els.chartNode.textContent = state.selected || "station";
+  renderChartMetricControls(samples);
   els.chartEmpty.style.display = samples.length ? "none" : "flex";
   if (!samples.length) {
     if (els.chartLegend) els.chartLegend.replaceChildren();
@@ -912,7 +1001,10 @@ function drawChart() {
   if (!keys.length) {
     cctx.fillStyle = faint;
     cctx.textAlign = "center";
-    cctx.fillText("no numeric readings in this window", (w - pad.l - pad.r) / 2 + pad.l, h / 2);
+    const message = availableChartKeys(samples).length
+      ? "select a graph variable to display"
+      : "no numeric readings in this window";
+    cctx.fillText(message, (w - pad.l - pad.r) / 2 + pad.l, h / 2);
   }
 }
 
@@ -920,11 +1012,14 @@ function renderChartTable(samples) {
   const thead = els.chartTable.querySelector("thead tr");
   const tbody = els.chartTable.querySelector("tbody");
   const keys = chartKeys(samples);
+  const available = availableChartKeys(samples);
 
   if (thead) {
     let headHtml = '<th scope="col">Time</th>';
     if (keys.length) {
       headHtml += keys.map((m) => `<th scope="col">${m.label}${m.unit ? ` (${m.unit})` : ""}</th>`).join("");
+    } else if (available.length) {
+      headHtml += '<th scope="col">No graph variables selected</th>';
     } else {
       headHtml += '<th scope="col">Temperature</th><th scope="col">Humidity</th>';
     }
@@ -940,6 +1035,8 @@ function renderChartTable(samples) {
           return `<td>${Number.isFinite(v) ? v.toFixed(m.decimals !== undefined ? m.decimals : 1) + (m.unit ? ` ${m.unit}` : "") : "not reporting"}</td>`;
         })
         .join("");
+    } else if (available.length) {
+      cellsHtml += "<td>no graph variables selected</td>";
     } else {
       const t = s.temperature;
       const hu = s.humidity;
@@ -988,7 +1085,10 @@ function comparisonMetrics() {
       if (code === "H" || key.toLowerCase().includes("hum")) return 1;
       if (code === "P" || key.toLowerCase().includes("press")) return 2;
       if (code === "L" || key.toLowerCase().includes("ldr")) return 3;
-      return 4;
+      if (code === "S") return 4;
+      if (code === "U") return 5;
+      if (code === "M") return 6;
+      return 7;
     };
     return priority(a) - priority(b) || a.localeCompare(b);
   });
@@ -1000,7 +1100,7 @@ function comparisonUnit(key) {
       const sampleUnits = samples[samples.length - 1]?.units || {};
       const nodeUnits = state.nodes.get(nodeId)?.units || {};
       const code = metricCode(key);
-      return ["L", "T", "H", "P"].includes(code)
+      return ["L", "T", "H", "P", "S", "U", "M"].includes(code)
         ? metricDefaultUnit(key)
         : sampleUnits[key] || nodeUnits[key] || metricDefaultUnit(key);
     }
@@ -1206,132 +1306,12 @@ function initComparisonView() {
   compareResizeObserver.observe(els.compareChartFrame);
 }
 
-/* ---------- automated insights ---------- */
-
-async function loadInsights(nodeId) {
-  if (!nodeId) {
-    els.insightsNode.textContent = "station";
-    els.insightsUpdatedAt.textContent = "—";
-    els.insightsContent.replaceChildren();
-    const p = document.createElement("p");
-    p.className = "empty-note";
-    p.textContent = "no station selected";
-    els.insightsContent.appendChild(p);
-    return;
-  }
-
-  const isNodeChange = els.insightsNode.textContent !== nodeId;
-  els.insightsNode.textContent = nodeId;
-  els.insightsUpdatedAt.textContent = "updating…";
-  if (isNodeChange) {
-    els.insightsContent.replaceChildren();
-  }
-  let parsed;
-  try {
-    const res = await fetch(`/nodes/${encodeURIComponent(nodeId)}/insights`);
-    if (!res.ok) throw new Error(String(res.status));
-    parsed = await res.json();
-  } catch {
-    if (state.selected !== nodeId) return;
-    els.insightsUpdatedAt.textContent = "unavailable";
-    const note = document.createElement("p");
-    note.className = "empty-note";
-    note.textContent = "Insights temporarily unavailable.";
-    els.insightsContent.replaceChildren(note);
-    return;
-  }
-
-  if (state.selected !== nodeId) return;
-
-  els.insightsUpdatedAt.textContent = fmtClock(parsed.generatedAt || new Date().toISOString());
-
-  const count = Number(parsed.sampleCount) || 0;
-  const insights = Array.isArray(parsed.insights) ? parsed.insights : [];
-
-  // Check if there are any numeric sensor samples in local history
-  const historySamples = state.samples.get(nodeId) || [];
-  let hasNumericSensorSample = false;
-  for (const s of historySamples) {
-    for (const [k, v] of Object.entries(s)) {
-      if (!["__t", "timestamp", "sequence", "bootId", "rssi", "rssiSourceNodeId", "hops", "units"].includes(k) && Number.isFinite(v)) {
-        hasNumericSensorSample = true;
-        break;
-      }
-    }
-    if (hasNumericSensorSample) break;
-  }
-
-  if (count === 0 || (!hasNumericSensorSample && count >= 20 && insights.length === 0)) {
-    const note = document.createElement("p");
-    note.className = "empty-note";
-    note.textContent = "No numeric sensor history available.";
-    els.insightsContent.replaceChildren(note);
-    return;
-  }
-
-  if (count < 20) {
-    const existingNote = els.insightsContent.querySelector(".empty-note");
-    if (existingNote) {
-      existingNote.textContent = `Collecting baseline: ${count}/20 valid samples.`;
-    } else {
-      const note = document.createElement("p");
-      note.className = "empty-note";
-      note.textContent = `Collecting baseline: ${count}/20 valid samples.`;
-      els.insightsContent.replaceChildren(note);
-    }
-    return;
-  }
-
-  if (insights.length === 0) {
-    const note = document.createElement("p");
-    note.className = "empty-note";
-    note.textContent = "All metrics within normal range; trends steady.";
-    els.insightsContent.replaceChildren(note);
-    return;
-  }
-
-  els.insightsContent.replaceChildren();
-  for (const item of insights) {
-    const row = document.createElement("div");
-    row.className = "insight-row";
-    row.dataset.kind = item.kind || "trend";
-
-    const tag = document.createElement("span");
-    tag.className = "insight-tag";
-    tag.textContent = (item.kind || "insight").toUpperCase();
-
-    const msg = document.createElement("span");
-    msg.className = "insight-text";
-    // Crucial requirement: insert returned message text with textContent, not innerHTML
-    const metricLabel = item.metric ? formatMetricLabel(item.metric) : "";
-    const metricUnit = item.metric ? metricDefaultUnit(item.metric) : "";
-    const displayLabel = metricUnit ? `${metricLabel} (${metricUnit})` : metricLabel;
-    msg.textContent = item.metric && item.message
-      ? item.message.split(item.metric).join(displayLabel)
-      : item.message || "";
-
-    row.appendChild(tag);
-    row.appendChild(msg);
-    els.insightsContent.appendChild(row);
-  }
-}
-
-let insightDebounceTimer = null;
-function scheduleInsightsUpdate(nodeId) {
-  if (state.selected !== nodeId) return;
-  clearTimeout(insightDebounceTimer);
-  insightDebounceTimer = setTimeout(() => {
-    if (state.selected === nodeId) {
-      loadInsights(nodeId);
-    }
-  }, 1000);
-}
-
 /* ---------- stations switching + history ---------- */
 
 function applyStation() {
   renderMetrics();
   const cached = state.samples.get(state.selected) || [];
+  renderChartMetricControls(cached);
   scheduleChartDraw();
   renderChartTable(cached);
 
@@ -1349,14 +1329,9 @@ function selectStation(id) {
     els.chatContextNode.textContent = state.chatScope === "all" ? "ALL STATIONS" : (id || "ALL STATIONS");
   }
   renderRoster();
-  els.insightsContent.replaceChildren();
-  els.insightsNode.textContent = id;
-  els.insightsUpdatedAt.textContent = "updating…";
-
   applyStation();
   const cached = state.samples.get(id);
   if (!cached || cached.length < 2) loadHistory(id);
-  loadInsights(id);
   pushLog("info", id, "selected");
 }
 
@@ -1407,7 +1382,6 @@ async function loadHistory(nodeId) {
   if (state.activeView === "compare") scheduleComparisonDraw();
   if (state.selected === nodeId) {
     applyStation();
-    loadInsights(nodeId);
   }
 }
 
@@ -1428,7 +1402,6 @@ async function refreshNodes() {
     state.selected = nodes[0].nodeId;
     applyStation();
     loadHistory(state.selected);
-    loadInsights(state.selected);
   } else if (state.selected && state.nodes.has(state.selected)) {
     renderMetrics();
   }
@@ -1479,6 +1452,7 @@ function connectSocket() {
       return;
     }
     if (msg.type === "telemetry" && msg.nodeId) onTelemetry(msg);
+    if (msg.type === "rssi_route") onRssiRoute(msg);
   });
 
   socket.addEventListener("close", () => {
@@ -1487,6 +1461,140 @@ function connectSocket() {
     clearTimeout(retryTimer);
     retryTimer = setTimeout(connectSocket, 2000);
   });
+}
+
+function getRssiMeasurement(measurementId) {
+  let measurement = state.rssiMeasurements.get(measurementId);
+  if (!measurement) {
+    measurement = {
+      id: measurementId,
+      routes: new Map(),
+      lastProbeAt: null,
+      quietTimer: null,
+      limitTimer: null,
+      closed: false,
+    };
+    state.rssiMeasurements.set(measurementId, measurement);
+    while (state.rssiMeasurements.size > 5) {
+      const [oldestId, oldest] = state.rssiMeasurements.entries().next().value;
+      window.clearTimeout(oldest.quietTimer);
+      window.clearTimeout(oldest.limitTimer);
+      state.rssiMeasurements.delete(oldestId);
+    }
+  }
+  return measurement;
+}
+
+function activateRssiMeasurement(measurementId) {
+  state.activeRssiMeasurementId = measurementId;
+  const measurement = getRssiMeasurement(measurementId);
+  measurement.closed = false;
+  measurement.limitTimer = window.setTimeout(
+    () => finishRssiMeasurement(measurementId),
+    RSSI_MEASUREMENT_MAX_MS,
+  );
+  const elapsedSinceProbe = measurement.lastProbeAt === null
+    ? 0
+    : Date.now() - measurement.lastProbeAt;
+  scheduleRssiMeasurementQuietEnd(
+    measurement,
+    Math.max(0, RSSI_MEASUREMENT_QUIET_MS - elapsedSinceProbe),
+  );
+  renderRssiMeasurement();
+}
+
+function scheduleRssiMeasurementQuietEnd(measurement, delay = RSSI_MEASUREMENT_QUIET_MS) {
+  window.clearTimeout(measurement.quietTimer);
+  measurement.quietTimer = window.setTimeout(
+    () => finishRssiMeasurement(measurement.id),
+    delay,
+  );
+}
+
+function finishRssiMeasurement(measurementId) {
+  const measurement = state.rssiMeasurements.get(measurementId);
+  if (!measurement || measurement.closed) return;
+  measurement.closed = true;
+  window.clearTimeout(measurement.quietTimer);
+  window.clearTimeout(measurement.limitTimer);
+  renderRssiMeasurement();
+}
+
+function onRssiRoute(message) {
+  if (message.measurementId === null || message.measurementId === undefined) return;
+  const measurement = getRssiMeasurement(message.measurementId);
+  measurement.routes.set(message.origin, message.route);
+  measurement.lastProbeAt = Date.now();
+  if (
+    message.measurementId === state.activeRssiMeasurementId &&
+    !measurement.closed
+  ) {
+    scheduleRssiMeasurementQuietEnd(measurement);
+    renderRssiMeasurement();
+  }
+}
+
+function renderRssiMeasurement() {
+  if (!els.rssiRouteResults || !els.rssiMeasurementStatus) return;
+  const measurement = state.rssiMeasurements.get(state.activeRssiMeasurementId);
+  els.rssiRouteResults.replaceChildren();
+  if (!measurement || measurement.routes.size === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty-note";
+    empty.textContent = measurement?.closed
+      ? "no probe routes received during this measurement"
+      : "no RSSI measurements yet";
+    els.rssiRouteResults.appendChild(empty);
+  } else {
+    const displayedRoutes = getDisplayedRssiRoutes(measurement);
+    for (const [origin, route] of displayedRoutes) {
+      const card = document.createElement("article");
+      card.className = "rssi-route-card";
+      const heading = document.createElement("h4");
+      heading.textContent = `ORIGIN ${origin}`;
+      card.appendChild(heading);
+      const hops = document.createElement("ol");
+      hops.className = "rssi-route-hops";
+      route.forEach((hop, index) => {
+        const item = document.createElement("li");
+        const isObserver = index === route.length - 1;
+        const reading = hop.rssi === null || hop.rssi === undefined
+          ? "RSSI unavailable"
+          : `${hop.rssi} dBm`;
+        const label = index === 0 ? "Origin" : isObserver ? "Observer" : `Hop ${index}`;
+        item.textContent = `${label} · ${hop.nodeId} · ${reading}`;
+        hops.appendChild(item);
+      });
+      card.appendChild(hops);
+      els.rssiRouteResults.appendChild(card);
+    }
+  }
+
+  if (!measurement) {
+    els.rssiMeasurementStatus.textContent = "no measurement";
+  } else if (measurement.closed) {
+    els.rssiMeasurementStatus.textContent = `complete · ${getDisplayedRssiRoutes(measurement).length} route(s)`;
+  } else {
+    els.rssiMeasurementStatus.textContent = `collecting · ${getDisplayedRssiRoutes(measurement).length} route(s)`;
+  }
+}
+
+function getDisplayedRssiRoutes(measurement) {
+  const directOriginsInLongerRoutes = new Set();
+  for (const route of measurement.routes.values()) {
+    if (route.length > 2) {
+      directOriginsInLongerRoutes.add(
+        `${route[route.length - 2].nodeId}>${route[route.length - 1].nodeId}`,
+      );
+    }
+  }
+  return [...measurement.routes.entries()]
+    .filter(([origin, route]) => !(
+      route.length === 2 &&
+      route[0].nodeId === origin &&
+      directOriginsInLongerRoutes.has(`${route[0].nodeId}>${route[1].nodeId}`)
+    ))
+    .sort(([a], [b]) => a.localeCompare(b));
 }
 
 function onTelemetry(msg) {
@@ -1545,11 +1653,9 @@ function onTelemetry(msg) {
     state.selected = msg.nodeId;
     if (els.chatContextNode) els.chatContextNode.textContent = state.selected;
     applyStation();
-    loadInsights(state.selected);
   } else if (msg.nodeId === state.selected) {
     applyStation();
     els.updatedAt.textContent = `${fmtClock(msg.timestamp)} · ${ageText(ageSeconds(msg.timestamp))}`;
-    scheduleInsightsUpdate(msg.nodeId);
   } else {
     renderMetrics();
   }
@@ -1560,7 +1666,7 @@ function onTelemetry(msg) {
     Object.entries(msg.payload || {})
       .map(([k, v]) => {
         const code = metricCode(k);
-        const unit = ["L", "T", "H", "P"].includes(code)
+        const unit = ["L", "T", "H", "P", "S", "U", "M"].includes(code)
           ? metricDefaultUnit(k)
           : (msg.units && msg.units[k]) || metricDefaultUnit(k);
         return `${formatMetricLabel(k)} ${Number.isFinite(Number(v)) ? Number(v) : v}${unit ? ` ${unit}` : ""}`;
@@ -1581,14 +1687,10 @@ setInterval(() => {
 }, 1000);
 setInterval(refreshHealth, 2000);
 setInterval(refreshNodes, 5000);
-setInterval(() => {
-  if (state.selected) {
-    loadInsights(state.selected);
-  }
-}, 10000);
-
-
 /* ---------- ai assistant chat ---------- */
+
+const CHAT_STORE = "espMeshChatHistory";
+const CHAT_VISIBLE_KEY = "espMeshChatVisible";
 
 function appendChatMessage(role, text) {
   if (!els.chatMessages) return;
@@ -1629,6 +1731,54 @@ function appendChatMessage(role, text) {
   return msg;
 }
 
+function persistChatHistory() {
+  try {
+    localStorage.setItem(CHAT_STORE, JSON.stringify(state.chatHistory.slice(-40)));
+  } catch {
+    // Chat remains available when browser storage is disabled.
+  }
+}
+
+function restoreChatHistory() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(CHAT_STORE) || "[]");
+    if (!Array.isArray(saved)) return;
+    state.chatHistory = saved
+      .filter((item) => item && ["user", "assistant"].includes(item.role) && typeof item.content === "string")
+      .slice(-40);
+    if (state.chatHistory.length && els.chatMessages) {
+      els.chatMessages.replaceChildren();
+      state.chatHistory.forEach(({ role, content }) => appendChatMessage(role, content));
+    }
+  } catch {
+    state.chatHistory = [];
+  }
+}
+
+function openExpandedChat() {
+  const nodeId = state.chatScope === "all" ? "" : (state.selected || "");
+  const chatWindow = window.open(`/static/chat.html?node=${encodeURIComponent(nodeId)}`, "mesh-ai-chat");
+  if (chatWindow) chatWindow.focus();
+}
+
+function setChatVisible(visible, focus = false) {
+  if (!els.chatSidebar) return;
+  els.chatSidebar.classList.toggle("is-collapsed", !visible);
+  els.chatSidebar.setAttribute("aria-hidden", String(!visible));
+  if (els.chatOpenBtn) {
+    els.chatOpenBtn.dataset.visible = String(!visible);
+    els.chatOpenBtn.setAttribute("aria-expanded", String(visible));
+  }
+  if (els.chatCloseBtn) els.chatCloseBtn.setAttribute("aria-expanded", String(visible));
+  try {
+    localStorage.setItem(CHAT_VISIBLE_KEY, visible ? "1" : "0");
+  } catch {
+    // Visibility can still be toggled for this page load.
+  }
+  if (visible && focus && els.chatInput) els.chatInput.focus();
+  if (!visible && els.chatOpenBtn) els.chatOpenBtn.focus();
+}
+
 async function checkAiStatus() {
   try {
     const res = await fetch("/api/ai/status");
@@ -1662,6 +1812,7 @@ async function sendChatMessage(promptText) {
 
   appendChatMessage("user", text);
   state.chatHistory.push({ role: "user", content: text });
+  persistChatHistory();
 
   const pendingMsg = appendChatMessage("assistant", "thinking…");
 
@@ -1682,6 +1833,7 @@ async function sendChatMessage(promptText) {
     const reply = data.reply || (data.error ? "Error: " + data.reply : "No response from AI.");
     appendChatMessage("assistant", reply);
     state.chatHistory.push({ role: "assistant", content: reply });
+    persistChatHistory();
 
     if (data.model && els.aiModelTag) {
       els.aiModelTag.textContent = data.model.toUpperCase();
@@ -1711,6 +1863,11 @@ function initChatEvents() {
   if (els.chatClearBtn) {
     els.chatClearBtn.addEventListener("click", () => {
       state.chatHistory = [];
+      try {
+        localStorage.removeItem(CHAT_STORE);
+      } catch {
+        // Clearing the in-memory transcript still works.
+      }
       if (els.chatMessages) {
         els.chatMessages.replaceChildren();
         appendChatMessage("assistant", "Chat history cleared. Ready for your questions.");
@@ -1738,12 +1895,44 @@ function initChatEvents() {
     });
   });
 
+  if (els.chatExpandBtn) els.chatExpandBtn.addEventListener("click", openExpandedChat);
+
+  let chatVisible = true;
+  try {
+    chatVisible = localStorage.getItem(CHAT_VISIBLE_KEY) !== "0";
+  } catch {
+    // Use the visible default when browser storage is unavailable.
+  }
+  setChatVisible(chatVisible);
+  if (els.chatCloseBtn) els.chatCloseBtn.addEventListener("click", () => setChatVisible(false));
+  if (els.chatOpenBtn) {
+    els.chatOpenBtn.addEventListener("click", () => setChatVisible(true, true));
+  }
+
+  restoreChatHistory();
+  window.addEventListener("storage", (event) => {
+    if (event.key !== CHAT_STORE) return;
+    state.chatHistory = [];
+    restoreChatHistory();
+    if (event.newValue === null && els.chatMessages) {
+      els.chatMessages.replaceChildren();
+      appendChatMessage("assistant", "Chat history cleared. Ready for your questions.");
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && els.chatSidebar?.contains(document.activeElement)) {
+      setChatVisible(false);
+    }
+  });
+
   checkAiStatus();
 }
 
 /* ---------- boot ---------- */
 
 refreshHealth().then(refreshNodes).then(() => {
+  initChartControls();
   applyStation();
   drawChart();
   initComparisonView();

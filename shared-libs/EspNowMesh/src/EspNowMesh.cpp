@@ -15,6 +15,8 @@ namespace
                                             0xff, 0xff, 0xff};
   constexpr size_t kMaxEspNowPacketSize = 250;
   constexpr uint8_t kMeshWifiChannel = 1; // Use the same channel on every node.
+  constexpr uint8_t kRssiProbeMarker[4] = {'R', 'S', 'S', 'I'};
+  constexpr size_t kRssiProbeHopSize = 7;
 
   // The whole struct is sent directly, so keep it within the ESP-NOW v1 limit.
   static_assert(sizeof(MeshMessage) <= kMaxEspNowPacketSize,
@@ -198,6 +200,16 @@ void EspNowMesh::update()
     }
     remember(message);
 
+    if (isRssiProbe(message) &&
+        message.payloadLength + kRssiProbeHopSize <= sizeof(message.payload))
+    {
+      std::memcpy(message.payload + message.payloadLength, mMacAddress,
+                  sizeof(mMacAddress));
+      message.payload[message.payloadLength + sizeof(mMacAddress)] =
+          static_cast<uint8_t>(packet.receiveInfo.rssi);
+      message.payloadLength += kRssiProbeHopSize;
+    }
+
     // Relayed packets are heard by everyone, but only the target (or all nodes
     // for a broadcast) invokes the application's handler.
     const bool addressedToThisNode = isBroadcast(message.destination) || std::memcmp(message.destination, mMacAddress, sizeof(mMacAddress)) == 0;
@@ -260,6 +272,25 @@ bool EspNowMesh::publishTo(const uint8_t destination[6],
   }
   remember(message);
   return true;
+}
+
+// Start a route trace with the originating node and an unavailable RSSI.
+bool EspNowMesh::publishRssiProbe()
+{
+  uint8_t payload[sizeof(kRssiProbeMarker) + kRssiProbeHopSize];
+  std::memcpy(payload, kRssiProbeMarker, sizeof(kRssiProbeMarker));
+  std::memcpy(payload + sizeof(kRssiProbeMarker), mMacAddress,
+              sizeof(mMacAddress));
+  payload[sizeof(payload) - 1] = static_cast<uint8_t>(-128);
+  return publish(payload, sizeof(payload));
+}
+
+// RSSI probes use a reserved payload marker followed by MAC/RSSI hop records.
+bool EspNowMesh::isRssiProbe(const MeshMessage &message)
+{
+  return message.payloadLength >= sizeof(kRssiProbeMarker) &&
+         std::memcmp(message.payload, kRssiProbeMarker,
+                     sizeof(kRssiProbeMarker)) == 0;
 }
 
 // Send a complete mesh packet over ESP-NOW's radio broadcast address.

@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ESP32 Mesh Telemetry — Observer</title>
-    <link rel="stylesheet" href="/static/styles.css?v=3.3" />
+    <link rel="stylesheet" href="/static/styles.css?v=3.5" />
   </head>
   <body>
     <div class="app-shell">
@@ -60,6 +60,7 @@
           </div>
           <div class="mesh-control-actions">
             <button type="button" id="request-data-btn" class="mesh-action-btn" disabled>REQUEST DATA NOW</button>
+            <button type="button" id="measure-rssi-btn" class="mesh-action-btn" disabled>MEASURE RSSI ROUTES</button>
             <form id="interval-form" class="interval-form">
               <label for="interval-seconds">REPORT INTERVAL <span>(SECONDS)</span></label>
               <input type="number" id="interval-seconds" min="0.001" max="4294967.295" step="0.001" value="3" required />
@@ -102,27 +103,39 @@
           </div>
         </section>
 
-        <section id="metric-grid" class="metric-strip" aria-live="polite">
-          <p class="empty-note" id="metrics-empty">no telemetry yet — waiting for the first station report</p>
-        </section>
-
-        <section class="insights-block" id="insights-block" aria-live="polite">
+        <section class="rssi-route-panel" aria-labelledby="rssi-route-title">
           <div class="panel-header">
             <div class="panel-title-wrap">
-              <h3>AUTOMATED INSIGHTS <span id="insights-node" class="mono-dim">station</span></h3>
-              <span class="panel-subtitle">STATISTICAL RULES · NO PREDICTION MODEL</span>
+              <h3 id="rssi-route-title">RSSI ROUTE MEASUREMENTS</h3>
+              <span class="panel-subtitle">FIRST-ARRIVAL ROUTE PER ORIGIN · NOT A COMPLETE MESH MAP</span>
             </div>
-            <span id="insights-updated-at" class="mono-dim">—</span>
+            <span id="rssi-measurement-status" class="mono-dim" role="status" aria-live="polite">no measurement</span>
           </div>
-          <div id="insights-content" class="insights-content">
-            <p class="empty-note" id="insights-empty">no station selected</p>
+          <div id="rssi-route-results" class="rssi-route-results" aria-live="polite">
+            <p class="empty-note">no RSSI measurements yet</p>
           </div>
+        </section>
+
+        <section id="metric-grid" class="metric-strip" aria-live="polite">
+          <p class="empty-note" id="metrics-empty">no telemetry yet — waiting for the first station report</p>
         </section>
 
         <section class="chart-block">
           <div class="panel-header">
             <div class="chart-header-left">
               <h3>TELEMETRY <span id="chart-node" class="mono-dim">station</span> <span id="chart-seq" class="mono-dim"></span></h3>
+              <div class="chart-controls" aria-label="Telemetry graph variables">
+                <label for="chart-series-left">SERIES 1
+                  <select id="chart-series-left" class="chart-series-select" aria-label="First graph variable">
+                    <option value="">HIDDEN</option>
+                  </select>
+                </label>
+                <label for="chart-series-right">SERIES 2
+                  <select id="chart-series-right" class="chart-series-select" aria-label="Second graph variable">
+                    <option value="">HIDDEN</option>
+                  </select>
+                </label>
+              </div>
               <div id="chart-legend" class="chart-legend"></div>
             </div>
             <span id="updated-at" class="mono-dim">—</span>
@@ -178,7 +191,11 @@
             <h3 class="chat-title">AI ASSISTANT <span id="ai-model-tag" class="tag" data-state="live">DEEPSEEK</span></h3>
             <span class="panel-subtitle">TELEMETRY RAG · DEW POINT PHYSICS</span>
           </div>
-          <button type="button" id="chat-clear-btn" class="btn-text" title="Clear chat history">CLEAR</button>
+          <div class="chat-head-actions">
+            <button type="button" id="chat-expand-btn" class="btn-text" title="Open AI chat in a full-page view">EXPAND &#8599;</button>
+            <button type="button" id="chat-clear-btn" class="btn-text" title="Clear chat history">CLEAR</button>
+            <button type="button" id="chat-close-btn" class="chat-close-btn" title="Hide the AI assistant" aria-controls="chat-sidebar" aria-expanded="true">&#10005;</button>
+          </div>
         </header>
 
         <div class="chat-context-bar">
@@ -209,8 +226,17 @@
           </form>
         </div>
       </aside>
+
+      <button type="button" id="chat-open-btn" class="chat-fab" data-visible="false"
+              aria-controls="chat-sidebar" aria-expanded="false" title="Open the AI assistant">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
+          <path d="M4 5h16v11H9l-5 3v-14z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+          <path d="M8 9h8M8 12h5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+        </svg>
+        <span>AI</span>
+      </button>
     </div>
 
-    <script src="/static/app.js?v=3.3"></script>
+    <script src="/static/app.js?v=3.5"></script>
   </body>
 </html>

@@ -100,12 +100,16 @@ def test_ask_mesh_ai_opencode_deepseek_flash_chat_completions(monkeypatch):
     monkeypatch.setenv("AI_API_KEY", "test_opencode_key")
     monkeypatch.delenv("AI_BASE_URL", raising=False)
     monkeypatch.delenv("AI_MODEL", raising=False)
+    monkeypatch.delenv("AI_API_FORMAT", raising=False)
+    monkeypatch.setenv("AI_SESSION_ID", "test-session-id")
 
     def mock_handler(request: httpx.Request):
         assert str(request.url) == "https://opencode.ai/inference/openai/v1/chat/completions"
+        assert request.headers["x-opencode-session"] == "test-session-id"
+        assert request.headers["user-agent"] == "esp-mesh-dashboard/1.0"
         body = json.loads(request.content.decode("utf-8"))
         assert body["model"] == "deepseek-v4.1-flash-free"
-        assert body["max_tokens"] == 800
+        assert body["max_tokens"] == 350
         assert any(item["role"] == "system" for item in body["messages"])
         return httpx.Response(
             200,
@@ -137,11 +141,30 @@ def test_ask_mesh_ai_opencode_deepseek_flash_chat_completions(monkeypatch):
     assert result["model"] == "deepseek-v4.1-flash-free"
 
 
+def test_opencode_api_format_can_be_overridden(monkeypatch):
+    monkeypatch.setenv("AI_PROVIDER", "opencode")
+    monkeypatch.setenv("AI_API_KEY", "test_opencode_key")
+    monkeypatch.setenv("AI_MODEL", "deepseek-v4.1-flash-free")
+    monkeypatch.setenv("AI_API_FORMAT", "responses")
+    monkeypatch.setenv("AI_SESSION_ID", "configured-session")
+
+    config = get_ai_config()
+    assert config["api_format"] == "responses"
+    assert config["session_id"] == "configured-session"
+
+    monkeypatch.setenv("AI_API_FORMAT", "unsupported")
+    assert get_ai_config()["api_format"] == "chat_completions"
+
+
 def test_api_chat_and_status_endpoints(monkeypatch):
     monkeypatch.setenv("AI_PROVIDER", "deepseek")
     monkeypatch.setenv("AI_BASE_URL", "https://api.deepseek.com")
     monkeypatch.setenv("AI_MODEL", "deepseek-chat")
     client = TestClient(app)
+
+    chat_page = client.get("/static/chat.html")
+    assert chat_page.status_code == 200
+    assert 'id="scope-select"' in chat_page.text
 
     # Status check
     res_status = client.get("/api/ai/status")

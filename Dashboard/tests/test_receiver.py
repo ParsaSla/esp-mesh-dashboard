@@ -26,6 +26,57 @@ def test_valid_message_is_normalized():
     assert message["payload"]["humidity"] == 48
 
 
+def test_soil_moisture_is_scaled_to_percentage():
+    message = normalize_message(
+        {
+            **VALID_MESSAGE,
+            "payload": {"S": 2048, "soil1.S": 4096, "soil0.S": 0, "humidity": 48},
+            "units": {"S": "adc"},
+        }
+    )
+
+    assert message["payload"] == {"S": 50.0, "soil1.S": 0.0, "soil0.S": 100.0, "humidity": 48.0}
+    assert message["units"] == {"S": "%", "soil1.S": "%", "soil0.S": "%"}
+
+
+def test_mesh_soil_moisture_is_scaled_to_percentage():
+    packet = {
+        "sender": "AA:BB:CC:DD:EE:02",
+        "origin": "AA:BB:CC:DD:EE:01",
+        "destination": "FF:FF:FF:FF:FF:FF",
+        "sequence": 7,
+        "ttl": 5,
+        "hops": 1,
+        "payload": '{"S":1024}',
+    }
+
+    message = normalize_message(packet)
+
+    assert message["payload"] == {"S": 75.0}
+    assert message["units"] == {"S": "%"}
+
+
+def test_uv_adc_reading_uses_calibration_table():
+    adc_for_mv = lambda millivolts: millivolts * 4095 / 3300
+    message = normalize_message(
+        {
+            **VALID_MESSAGE,
+            "payload": {
+                "uv1.U": adc_for_mv(49),
+                "U": adc_for_mv(227),
+                "uv2.U": adc_for_mv((227 + 318) / 2),
+                "uv3.U": 4095,
+            },
+        }
+    )
+
+    assert message["payload"]["uv1.U"] == 0.0
+    assert message["payload"]["U"] == pytest.approx(1.0, abs=0.01)
+    assert message["payload"]["uv2.U"] == pytest.approx(1.5, abs=0.01)
+    assert message["payload"]["uv3.U"] == 11.0
+    assert message["units"] == {"uv1.U": "UVI", "U": "UVI", "uv2.U": "UVI", "uv3.U": "UVI"}
+
+
 def test_invalid_json_is_rejected():
     with pytest.raises(ValueError, match="Invalid JSON message"):
         normalize_message('{"nodeId": "node-001"')
@@ -40,13 +91,26 @@ def test_duplicate_sequence_is_rejected():
     receiver = MeshReceiver()
     receiver.handle_message(VALID_MESSAGE)
 
-    duplicate = {
+    duplicate = {**VALID_MESSAGE}
+
+    with pytest.raises(ValueError, match="Duplicate sequence and payload"):
+        receiver.handle_message(duplicate)
+
+
+def test_same_sequence_with_different_payload_is_accepted():
+    receiver = MeshReceiver()
+    receiver.handle_message(VALID_MESSAGE)
+
+    updated = {
         **VALID_MESSAGE,
         "payload": {"temperature": 25.1, "humidity": 49},
     }
+    event = receiver.handle_message(updated)
 
-    with pytest.raises(ValueError, match="Duplicate or out-of-order sequence"):
-        receiver.handle_message(duplicate)
+    assert event["sequence"] == VALID_MESSAGE["sequence"]
+    assert event["payload"] == updated["payload"]
+    assert receiver.get_node(VALID_MESSAGE["nodeId"])["payload"] == updated["payload"]
+    assert len(receiver.get_history(VALID_MESSAGE["nodeId"])) == 2
 
 
 def test_latest_value_replaces_previous_state():
@@ -117,6 +181,101 @@ def test_mesh_callback_json_accepts_null_rssi_and_text_payload():
     assert event["packetPayload"] == "hello mesh"
 
 
+def test_mesh_same_sequence_with_different_raw_payload_is_accepted():
+    receiver = MeshReceiver()
+    packet = {
+        "sender": "AA:BB:CC:DD:EE:02",
+        "origin": "AA:BB:CC:DD:EE:01",
+        "destination": "FF:FF:FF:FF:FF:FF",
+        "sequence": 8,
+        "ttl": 5,
+        "hops": 1,
+        "payload": '{"U":2000}',
+    }
+    first = receiver.handle_message(packet)
+    changed_payload = {**packet, "payload": '{"U":3000}'}
+    second = receiver.handle_message(changed_payload)
+
+    assert first["payload"] == second["payload"] == {"U": 11.0}
+    assert second["packetPayload"] == changed_payload["payload"]
+    assert len(receiver.get_history(packet["origin"])) == 2
+
+
+def test_rssi_probe_payload_decodes_ordered_hops_and_unavailable_rssi():
+    origin = bytes.fromhex("AABBCCDDEE01")
+    relay = bytes.fromhex("AABBCCDDEE02")
+    observer = bytes.fromhex("AABBCCDDEE03")
+    payload = b"RSSI" + origin + bytes([0x80]) + relay + bytes([0xC4]) + observer + bytes([0xD0])
+    packet = {
+        "sender": "AA:BB:CC:DD:EE:02",
+        "rssi": -60,
+        "origin": "AA:BB:CC:DD:EE:01",
+        "destination": "FF:FF:FF:FF:FF:FF",
+        "sequence": 12,
+        "ttl": 5,
+        "hops": 2,
+        "payload": payload.decode("latin-1"),
+    }
+
+    message = normalize_message(json.dumps(packet))
+
+    assert message["type"] == "rssi_route"
+    assert message["nodeId"] == "AA:BB:CC:DD:EE:01"
+    assert message["route"] == [
+        {"nodeId": "AA:BB:CC:DD:EE:01", "rssi": None},
+        {"nodeId": "AA:BB:CC:DD:EE:02", "rssi": -60},
+        {"nodeId": "AA:BB:CC:DD:EE:03", "rssi": -48},
+    ]
+
+
+def test_rssi_probe_payload_rejects_incomplete_hop_record():
+    packet = {
+        "sender": "AA:BB:CC:DD:EE:02",
+        "rssi": -60,
+        "origin": "AA:BB:CC:DD:EE:01",
+        "destination": "FF:FF:FF:FF:FF:FF",
+        "sequence": 12,
+        "ttl": 5,
+        "hops": 1,
+        "payload": "RSSI" + "A" * 6,
+    }
+
+    with pytest.raises(ValueError, match="incomplete hop records"):
+        normalize_message(packet)
+
+
+def test_rssi_probe_origins_group_in_one_measurement_without_telemetry():
+    mesh_receiver = MeshReceiver()
+    measurement_id = mesh_receiver.begin_rssi_measurement()
+
+    def probe(origin, relay):
+        payload = b"RSSI" + bytes.fromhex(origin.replace(":", "")) + b"\x80"
+        payload += bytes.fromhex(relay.replace(":", "")) + bytes([0xC0])
+        return {
+            "sender": relay,
+            "rssi": -64,
+            "origin": origin,
+            "destination": "FF:FF:FF:FF:FF:FF",
+            "sequence": 1,
+            "ttl": 5,
+            "hops": 1,
+            "payload": payload.decode("latin-1"),
+        }
+
+    first = mesh_receiver.handle_message(probe("AA:BB:CC:DD:EE:01", "AA:BB:CC:DD:EE:10"))
+    second = mesh_receiver.handle_message(probe("AA:BB:CC:DD:EE:02", "AA:BB:CC:DD:EE:11"))
+
+    assert first["measurementId"] == measurement_id
+    assert second["measurementId"] == measurement_id
+    assert {first["origin"], second["origin"]} == {
+        "AA:BB:CC:DD:EE:01",
+        "AA:BB:CC:DD:EE:02",
+    }
+    assert mesh_receiver.nodes == {}
+    assert mesh_receiver.history.get("AA:BB:CC:DD:EE:01") == []
+    assert len(mesh_receiver.active_rssi_measurement["routes"]) == 2
+
+
 def test_api_endpoints_expose_latest_node_state():
     client = TestClient(app)
     receiver.nodes.clear()
@@ -129,6 +288,9 @@ def test_api_endpoints_expose_latest_node_state():
     assert 'id="mesh-controls-title"' in dashboard.text
     assert "BROADCAST TO ALL MESH NODES VIA THE OBSERVER" in dashboard.text
     assert 'id="deep-sleep-form"' in dashboard.text
+    assert 'id="measure-rssi-btn"' in dashboard.text
+    assert 'id="rssi-route-results"' in dashboard.text
+    assert 'id="hide-repeated-observer-rssi"' not in dashboard.text
     assert 'id="deep-sleep-btn"' in dashboard.text
     assert 'id="interval-seconds"' in dashboard.text
     assert 'id="deep-sleep-seconds"' in dashboard.text
@@ -177,6 +339,10 @@ def test_mesh_command_endpoint_writes_observer_serial_commands(monkeypatch):
         "/api/mesh/commands",
         json={"command": "DEEP_SLEEP", "sleepMs": 60000},
     )
+    measure_rssi = client.post(
+        "/api/mesh/commands",
+        json={"command": "MEASURE_RSSI"},
+    )
 
     assert request_data.status_code == 200
     assert request_data.json() == {"sent": True, "command": "SEND_DATA"}
@@ -184,15 +350,27 @@ def test_mesh_command_endpoint_writes_observer_serial_commands(monkeypatch):
     assert change_interval.json() == {"sent": True, "command": "CHANGE_INTERVAL 5000"}
     assert deep_sleep.status_code == 200
     assert deep_sleep.json() == {"sent": True, "command": "DEEP_SLEEP 60000"}
-    assert serial.writes == [b"SEND_DATA\n", b"CHANGE_INTERVAL 5000\n", b"DEEP_SLEEP 60000\n"]
+    assert measure_rssi.status_code == 200
+    assert measure_rssi.json()["sent"] is True
+    assert measure_rssi.json()["command"] == "MEASURE_RSSI"
+    assert isinstance(measure_rssi.json()["measurementId"], int)
+    assert serial.writes == [
+        b"SEND_DATA\n",
+        b"CHANGE_INTERVAL 5000\n",
+        b"DEEP_SLEEP 60000\n",
+        b"MEASURE_RSSI\n",
+    ]
 
 
 def test_mesh_command_endpoint_rejects_invalid_or_offline_commands(monkeypatch):
     monkeypatch.setattr(receiver, "transport", None)
     monkeypatch.setattr(receiver, "connected", False)
+    monkeypatch.setattr(receiver, "active_rssi_measurement", None)
     client = TestClient(app)
 
     assert client.post("/api/mesh/commands", json={"command": "SEND_DATA"}).status_code == 503
+    assert client.post("/api/mesh/commands", json={"command": "MEASURE_RSSI"}).status_code == 503
+    assert receiver.active_rssi_measurement is None
     assert client.post(
         "/api/mesh/commands",
         json={"command": "CHANGE_INTERVAL", "intervalMs": 0},
@@ -208,6 +386,10 @@ def test_mesh_command_endpoint_rejects_invalid_or_offline_commands(monkeypatch):
     assert client.post(
         "/api/mesh/commands",
         json={"command": "DEEP_SLEEP"},
+    ).status_code == 400
+    assert client.post(
+        "/api/mesh/commands",
+        json={"command": "MEASURE_RSSI", "intervalMs": 1000},
     ).status_code == 400
 
 

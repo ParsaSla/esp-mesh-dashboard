@@ -46,6 +46,9 @@ public:
   // Sends a message addressed to the node with this MAC address.
   bool publishTo(const uint8_t destination[6], const uint8_t *payload,
                  size_t length);
+  // Broadcasts "RSSI" followed by MAC/RSSI hop records; the origin RSSI is -128.
+  bool publishRssiProbe();
+  static bool isRssiProbe(const MeshMessage &message);
   // Register the function to call when an applicable message is received.
   void setMessageHandler(MessageHandler handler, void *context = nullptr);
 
